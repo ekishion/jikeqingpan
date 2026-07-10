@@ -42,12 +42,37 @@ function fileIcon(name, isDir) {
   return map[ext] || '📄';
 }
 
-/** 显示 Toast 提示 */
+let toastContainer = null;
+
+/** 显示 Toast 提示：每次创建独立卡片，按顺序堆叠并独立消失 */
 function showToast(msg) {
-  const toast = document.getElementById('toast');
+  if (!toastContainer) {
+    toastContainer = document.createElement('div');
+    toastContainer.id = 'toast-container';
+    toastContainer.setAttribute('aria-live', 'polite');
+    toastContainer.setAttribute('aria-atomic', 'false');
+    document.body.appendChild(toastContainer);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'status');
   toast.textContent = msg;
-  toast.classList.add('show');
-  setTimeout(function() { toast.classList.remove('show'); }, 2500);
+  toastContainer.appendChild(toast);
+
+  requestAnimationFrame(function() {
+    toast.classList.add('show');
+  });
+
+  const dismiss = function() {
+    if (toast.dataset.dismissed === 'true') return;
+    toast.dataset.dismissed = 'true';
+    toast.classList.remove('show');
+    setTimeout(function() { toast.remove(); }, 220);
+  };
+
+  toast.addEventListener('click', dismiss);
+  setTimeout(dismiss, 3000);
 }
 
 // ===== 路径导航与面包屑 =====
@@ -135,7 +160,15 @@ function loadFiles(dir) {
   countEl.textContent = '读取中…';
   refreshBtn.disabled = true;
 
-  fetch('/api/files?dir=' + encodeURIComponent(targetDir), { credentials: 'same-origin' })
+  fetch('/api/files', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': getCookie('csrf_token') || ''
+    },
+    body: JSON.stringify({ dir: targetDir })
+  })
     .then(function(resp) {
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       return resp.json();
@@ -159,10 +192,8 @@ function loadFiles(dir) {
         return;
       }
 
-      // 2. 依次排序：文件夹排前面，文件排后面
-      files.sort(function(a, b) {
-        return b.isdir - a.isdir;
-      });
+      // 2. 排序：文件夹排前面，同一类型内按名称自然升序排列
+      sortFiles(files);
 
       // 3. 构建并渲染条目
       files.forEach(function(file) {
@@ -181,6 +212,24 @@ function loadFiles(dir) {
     .finally(function() {
       refreshBtn.disabled = false;
     });
+}
+
+function sortFiles(files) {
+  return files.sort(function(a, b) {
+    var typeDiff = Number(b.isdir === 1) - Number(a.isdir === 1);
+    if (typeDiff !== 0) return typeDiff;
+
+    var nameA = String(a.server_filename || '');
+    var nameB = String(b.server_filename || '');
+    var nameDiff = nameA.localeCompare(nameB, 'zh-CN', {
+      numeric: true,
+      sensitivity: 'base'
+    });
+    if (nameDiff !== 0) return nameDiff;
+
+    // 名称相同时用完整路径保证结果稳定。
+    return String(a.path || '').localeCompare(String(b.path || ''), 'zh-CN');
+  });
 }
 
 /** 安全构建返回上一级条目 */
@@ -256,8 +305,7 @@ function buildFileItem(file) {
 
   // 动作按钮容器
   const actionsEl = document.createElement('div');
-  actionsEl.style.display = 'flex';
-  actionsEl.style.gap = '8px';
+  actionsEl.className = 'file-actions';
 
   const actionBtn = document.createElement('button');
   actionBtn.className = 'file-action';
@@ -315,22 +363,10 @@ function downloadFile(filePath, fileName) {
 
   showToast('⏳ 正在生成安全直链…');
 
-  fetch('/api/download?path=' + encodeURIComponent(filePath) + '&format=json', { credentials: 'same-origin' })
-    .then(function(resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
-    })
-    .then(function(data) {
-      const urls = data.urls || [];
-      if (!urls.length || !urls[0].url) {
-        throw new Error('签名直链为空');
-      }
-      const downloadUrl = urls[0].url;
-
-      // 百度直链为跨域地址，a.download 属性对跨域无效
-      // 使用 window.open 新窗口打开直链，浏览器会自动触发下载
+  requestShortLink(filePath)
+    .then(function(downloadUrl) {
+      // 短链接会在服务端生成百度直链并重定向，前端不再暴露文件路径。
       window.open(downloadUrl, '_blank', 'noopener,noreferrer');
-
       showToast('✅ 唤起下载：' + fileName);
     })
     .catch(function(err) {
@@ -340,27 +376,76 @@ function downloadFile(filePath, fileName) {
 }
 
 function copyLink(filePath) {
-  const url = window.location.origin + '/api/download?path=' + encodeURIComponent(filePath);
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(url).then(function() {
-      showToast('✅ 链接已复制到剪贴板');
-    }).catch(function(err) {
+  requestShortLink(filePath)
+    .then(function(url) {
+      return copyText(url);
+    })
+    .then(function() {
+      showToast('✅ 短链接已复制到剪贴板');
+    })
+    .catch(function(err) {
       showToast('❌ 复制失败');
       console.warn('复制链接失败', err);
     });
-  } else {
+}
+
+function requestShortLink(filePath) {
+  const csrfToken = getCookie('csrf_token');
+  return fetch('/api/download', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrfToken || ''
+    },
+    body: JSON.stringify({ path: filePath })
+  })
+    .then(function(resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.json();
+    })
+    .then(function(data) {
+      const urls = data.urls || [];
+      if (!urls.length || !urls[0].url) {
+        throw new Error('短链接为空');
+      }
+      return new URL(urls[0].url, window.location.origin).href;
+    });
+}
+
+function getCookie(name) {
+  const prefix = name + '=';
+  const cookies = document.cookie.split(';');
+  for (let i = 0; i < cookies.length; i++) {
+    const cookie = cookies[i].trim();
+    if (cookie.indexOf(prefix) === 0) {
+      return decodeURIComponent(cookie.slice(prefix.length));
+    }
+  }
+  return '';
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+
+  return new Promise(function(resolve, reject) {
     const input = document.createElement('input');
-    input.value = url;
+    input.value = text;
     document.body.appendChild(input);
     input.select();
     try {
-      document.execCommand('copy');
-      showToast('✅ 链接已复制到剪贴板');
+      if (!document.execCommand('copy')) {
+        throw new Error('浏览器拒绝复制');
+      }
+      resolve();
     } catch (err) {
-      showToast('❌ 复制失败');
+      reject(err);
+    } finally {
+      document.body.removeChild(input);
     }
-    document.body.removeChild(input);
-  }
+  });
 }
 
 // ===== 初始化 =====

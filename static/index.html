@@ -178,6 +178,13 @@
       min-width: 0;
     }
 
+    .file-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
     .file-name {
       font-size: 0.95rem;
       font-weight: 500;
@@ -248,24 +255,121 @@
     }
 
     /* ===== Toast 提示 ===== */
-    #toast {
+    #toast-container {
       position: fixed;
       bottom: 24px;
       left: 50%;
-      transform: translateX(-50%) translateY(80px);
-      background: #1f2937;
-      color: #ffffff;
-      padding: 10px 20px;
-      border-radius: 30px;
-      font-size: 0.85rem;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-      transition: transform 0.25s ease;
+      width: auto;
+      max-width: calc(100vw - 32px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      transform: translateX(-50%);
       pointer-events: none;
-      z-index: 100;
+      z-index: 1000;
     }
 
-    #toast.show {
-      transform: translateX(-50%) translateY(0);
+    .toast {
+      box-sizing: border-box;
+      width: max-content;
+      max-width: min(320px, calc(100vw - 32px));
+      padding: 9px 15px;
+      border: 1px solid #ffffff;
+      border-radius: 10px;
+      background: #ffffff;
+      color: #222222;
+      font-size: 0.85rem;
+      line-height: 1.45;
+      text-align: center;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+      opacity: 0;
+      transform: translateY(14px) scale(0.98);
+      transition: opacity 0.22s ease, transform 0.22s ease;
+      pointer-events: auto;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    @media (max-width: 600px) {
+      body {
+        padding: 24px 12px 56px;
+      }
+
+      .header h1 {
+        font-size: 1.55rem;
+      }
+
+      .breadcrumbs {
+        padding: 10px 12px;
+        font-size: 0.86rem;
+      }
+
+      .toolbar {
+        align-items: flex-start;
+      }
+
+      .file-item {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        align-items: start;
+        justify-items: end;
+        gap: 10px 12px;
+        padding: 14px 12px;
+      }
+
+      .file-icon {
+        grid-column: 1;
+        grid-row: 1 / 3;
+        width: 36px;
+        padding-top: 2px;
+      }
+
+      .file-info {
+        grid-column: 2;
+        min-width: 0;
+        width: 100%;
+      }
+
+      .file-name {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.4;
+      }
+
+      .file-meta {
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+
+      .file-actions {
+        grid-column: 2;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .file-action {
+        padding: 7px 10px;
+        font-size: 0.82rem;
+      }
+
+      #toast-container {
+        bottom: 16px;
+        max-width: calc(100vw - 24px);
+      }
+
+      .toast {
+        max-width: calc(100vw - 24px);
+      }
     }
 
     /* ===== 底部样式 ===== */
@@ -332,9 +436,6 @@
       <a href="https://51.ruyo.net" target="_blank" rel="">作者博客</a>
     </footer>
   </div>
-
-  <!-- Toast -->
-  <div id="toast"></div>
 
   <!-- 外部脚本 -->
   <script src="/app.js"></script>

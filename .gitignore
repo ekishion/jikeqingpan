@@ -1,1 +1,4 @@
 config.json
+.gocache
+*.exe
+main_test.go

@@ -4,12 +4,15 @@ package main
 
 import (
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,8 +46,14 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 8080
 	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return nil, fmt.Errorf("port 必须在 1 到 65535 之间")
+	}
 	if cfg.RateLimitPerSecond == 0 {
 		cfg.RateLimitPerSecond = 10
+	}
+	if cfg.RateLimitPerSecond < 1 {
+		return nil, fmt.Errorf("rate_limit_per_second 必须大于 0")
 	}
 	if cfg.BaiduAppID == "" {
 		cfg.BaiduAppID = "250528"
@@ -127,15 +136,22 @@ func isValidBaiduPath(p string) bool {
 	if !validPathRe.MatchString(p) {
 		return false
 	}
-	// 清理后确保没有 .. 穿越
+	for _, segment := range strings.Split(p, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	// 拒绝会被规范化的路径，避免路径语义在校验后发生变化。
 	cleaned := path.Clean(p)
-	return !strings.Contains(cleaned, "..") && strings.HasPrefix(cleaned, "/")
+	return cleaned == p && strings.HasPrefix(cleaned, "/")
 }
 
 // fileMeta 文件元数据，包含下载签名计算所需的 id 和 md5
 type fileMeta struct {
-	FsID int64  `json:"fs_id"`
-	MD5  string `json:"md5"`
+	FsID          int64     `json:"fs_id"`
+	MD5           string    `json:"md5"`
+	DLink         string    `json:"dlink"`
+	DLinkCachedAt time.Time `json:"-"`
 }
 
 // fileListCache 缓存文件列表中每个文件的元数据，按路径索引
@@ -144,6 +160,8 @@ type fileListCache struct {
 	filesByPath map[string]fileMeta // 文件路径 -> 元数据
 	updatedAt   time.Time
 }
+
+const cachedDLinkTTL = 5 * time.Minute
 
 func newFileListCache() *fileListCache {
 	return &fileListCache{filesByPath: make(map[string]fileMeta)}
@@ -154,9 +172,10 @@ func (c *fileListCache) update(listJSON []byte) {
 	var resp struct {
 		Errno int `json:"errno"`
 		List  []struct {
-			Path string `json:"path"`
-			FsID int64  `json:"fs_id"`
-			MD5  string `json:"md5"`
+			Path  string `json:"path"`
+			FsID  int64  `json:"fs_id"`
+			MD5   string `json:"md5"`
+			DLink string `json:"dlink"`
 		} `json:"list"`
 	}
 	if err := json.Unmarshal(listJSON, &resp); err != nil {
@@ -180,8 +199,10 @@ func (c *fileListCache) update(listJSON []byte) {
 	for _, f := range resp.List {
 		if f.Path != "" && f.FsID != 0 {
 			c.filesByPath[f.Path] = fileMeta{
-				FsID: f.FsID,
-				MD5:  f.MD5,
+				FsID:          f.FsID,
+				MD5:           f.MD5,
+				DLink:         f.DLink,
+				DLinkCachedAt: time.Now(),
 			}
 		}
 	}
@@ -197,28 +218,129 @@ func (c *fileListCache) getFileMeta(path string) (fileMeta, bool) {
 	return meta, ok
 }
 
+func (c *fileListCache) getCachedDLink(filePath string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	meta, ok := c.filesByPath[filePath]
+	if !ok || meta.DLink == "" || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
+		return "", false
+	}
+	return meta.DLink, true
+}
+
+func (c *fileListCache) setDLink(filePath, dlink string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	meta, ok := c.filesByPath[filePath]
+	if !ok {
+		return
+	}
+	meta.DLink = dlink
+	meta.DLinkCachedAt = time.Now()
+	c.filesByPath[filePath] = meta
+}
+
 // ---------- 服务器 ----------
 
 // Server 应用服务器
 type Server struct {
-	cfg       *Config
-	limiter   *RateLimiter
-	mux       *http.ServeMux
-	cache     *fileListCache // 文件列表缓存，dlink 存在服务端，不暴露给前端
-	uk        int64          // 百度用户uk
-	sk        string         // 百度授权sk
-	sessionMu sync.Mutex     // 保护 uk/sk 刷新
+	cfg          *Config
+	limiter      *RateLimiter
+	mux          *http.ServeMux
+	baiduBaseURL string
+	httpClient   *http.Client
+	shortLinks   *shortLinkStore
+	cache        *fileListCache // 文件列表缓存，dlink 存在服务端，不暴露给前端
+	uk           int64          // 百度用户uk
+	sk           string         // 百度授权sk
+	sessionMu    sync.Mutex     // 保护 uk/sk 刷新
+}
+
+const (
+	shortLinkTTL        = time.Hour
+	csrfTokenCookieName = "csrf_token"
+)
+
+var shortLinkTokenRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+type shortLink struct {
+	filePath  string
+	expiresAt time.Time
+}
+
+type shortLinkStore struct {
+	mu    sync.Mutex
+	links map[string]shortLink
+	ttl   time.Duration
+}
+
+func newShortLinkStore(ttl time.Duration) *shortLinkStore {
+	if ttl <= 0 {
+		ttl = shortLinkTTL
+	}
+	return &shortLinkStore{
+		links: make(map[string]shortLink),
+		ttl:   ttl,
+	}
+}
+
+func (s *shortLinkStore) create(filePath string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for token, link := range s.links {
+		if !now.Before(link.expiresAt) {
+			delete(s.links, token)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			return "", fmt.Errorf("生成短链接令牌失败: %w", err)
+		}
+		token := hex.EncodeToString(buf)
+		if _, exists := s.links[token]; exists {
+			continue
+		}
+		s.links[token] = shortLink{filePath: filePath, expiresAt: now.Add(s.ttl)}
+		return token, nil
+	}
+	return "", fmt.Errorf("生成短链接令牌失败: 随机令牌冲突")
+}
+
+func (s *shortLinkStore) resolve(token string) (string, bool) {
+	if !shortLinkTokenRe.MatchString(token) {
+		return "", false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link, ok := s.links[token]
+	if !ok {
+		return "", false
+	}
+	if !time.Now().Before(link.expiresAt) {
+		delete(s.links, token)
+		return "", false
+	}
+	return link.filePath, true
 }
 
 func newServer(cfg *Config) *Server {
 	s := &Server{
-		cfg:     cfg,
-		limiter: newRateLimiter(cfg.RateLimitPerSecond),
-		mux:     http.NewServeMux(),
-		cache:   newFileListCache(),
+		cfg:          cfg,
+		limiter:      newRateLimiter(cfg.RateLimitPerSecond),
+		mux:          http.NewServeMux(),
+		baiduBaseURL: "https://pan.baidu.com",
+		httpClient:   &http.Client{Timeout: 15 * time.Second},
+		shortLinks:   newShortLinkStore(shortLinkTTL),
+		cache:        newFileListCache(),
 	}
 	s.mux.HandleFunc("/api/files", s.withSecurity(s.handleFiles))
 	s.mux.HandleFunc("/api/download", s.withSecurity(s.handleDownload))
+	s.mux.HandleFunc("/d/", s.withSecurity(s.handleShortDownload))
 	// 使用 FileServer 提供 static/ 目录下的所有静态资源（index.html, app.js 等）
 	staticFS := http.FileServer(http.Dir("static"))
 	s.mux.HandleFunc("/", s.withSecurity(func(w http.ResponseWriter, r *http.Request) {
@@ -236,8 +358,10 @@ func newServer(cfg *Config) *Server {
 // withSecurity 统一安全中间件：添加安全响应头 + 频率限制
 func (s *Server) withSecurity(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 只允许 GET 方法（减少攻击面）
-		if r.Method != http.MethodGet {
+		// 查询接口允许 GET；文件列表和短链接申请允许带 CSRF 令牌的 POST。
+		isProtectedPost := r.Method == http.MethodPost &&
+			(r.URL.Path == "/api/download" || r.URL.Path == "/api/files")
+		if r.Method != http.MethodGet && !isProtectedPost {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 			return
 		}
@@ -251,15 +375,32 @@ func (s *Server) withSecurity(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodGet {
+			if _, err := r.Cookie(csrfTokenCookieName); err != nil {
+				token, tokenErr := newCSRFToken()
+				if tokenErr != nil {
+					http.Error(w, "生成安全令牌失败", http.StatusInternalServerError)
+					return
+				}
+				http.SetCookie(w, &http.Cookie{
+					Name:     csrfTokenCookieName,
+					Value:    token,
+					Path:     "/",
+					MaxAge:   3600,
+					SameSite: http.SameSiteLaxMode,
+					Secure:   r.TLS != nil,
+				})
+			}
+		}
+		if isProtectedPost && !hasValidCSRFToken(r) {
+			http.Error(w, "CSRF 令牌无效", http.StatusForbidden)
+			return
+		}
 
 		// TODO(security): 当前仅限本地访问，如需对外开放需添加认证（OAuth/JWT）
-		// 频率限制：取真实IP
-		ip := r.RemoteAddr
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// 只取第一个，防止伪造
-			ip = strings.SplitN(xff, ",", 2)[0]
-		}
-		ip = strings.TrimSpace(ip)
+		// RemoteAddr 包含端口；只使用主机部分，否则同一客户端可通过更换
+		// 临时端口绕过限流。未配置可信代理时不信任 X-Forwarded-For。
+		ip := clientIP(r.RemoteAddr)
 
 		isStatic := r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/app.js"
 		if !isStatic {
@@ -273,15 +414,43 @@ func (s *Server) withSecurity(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func clientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+func newCSRFToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("生成 CSRF 令牌失败: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func hasValidCSRFToken(r *http.Request) bool {
+	cookie, err := r.Cookie(csrfTokenCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	headerToken := r.Header.Get("X-CSRF-Token")
+	if headerToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(headerToken)) == 1
+}
+
 // ---------- API处理 ----------
 
-// fetchFileList 拉取百度网盘文件列表（dlink=1 返回预签名下载链接）
+// fetchFileList 拉取百度网盘文件列表。下载直链只在服务端按需生成。
 func (s *Server) fetchFileList(dir string) ([]byte, error) {
 	if dir == "" {
 		dir = "/"
 	}
 	apiURL := fmt.Sprintf(
-		"https://pan.baidu.com/youth/api/list?clienttype=0&app_id=%s&web=1&order=time&desc=1&num=100&page=1&dlink=1&dir=%s",
+		s.baiduBaseURL+"/youth/api/list?clienttype=0&app_id=%s&web=1&order=time&desc=1&num=100&page=1&dlink=1&dir=%s",
 		url.QueryEscape(s.cfg.BaiduAppID),
 		url.QueryEscape(dir),
 	)
@@ -290,7 +459,20 @@ func (s *Server) fetchFileList(dir string) ([]byte, error) {
 
 // handleFiles 获取文件列表，代理百度网盘 list API
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	dir := r.URL.Query().Get("dir")
+	var dir string
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+		var request struct {
+			Dir string `json:"dir"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "请求体格式错误", http.StatusBadRequest)
+			return
+		}
+		dir = request.Dir
+	} else {
+		dir = r.URL.Query().Get("dir")
+	}
 	if dir == "" {
 		dir = "/"
 	}
@@ -307,18 +489,48 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 异步更新缓存（不阻塞响应）
-	go s.cache.update(body)
+	// 直链只缓存于服务端，返回给前端前必须移除 dlink 字段。
+	s.cache.update(body)
+	publicBody, err := stripDownloadLinks(body)
+	if err != nil {
+		log.Printf("[ERROR] 清理文件列表直链失败: %v", err)
+		http.Error(w, "处理文件列表失败", http.StatusBadGateway)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Write(body) //nolint:errcheck
+	_, _ = w.Write(publicBody)
+}
+
+func stripDownloadLinks(body []byte) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	listRaw, ok := response["list"]
+	if !ok {
+		return body, nil
+	}
+	var list []map[string]json.RawMessage
+	if err := json.Unmarshal(listRaw, &list); err != nil {
+		return nil, err
+	}
+	for _, item := range list {
+		delete(item, "dlink")
+	}
+	cleanList, err := json.Marshal(list)
+	if err != nil {
+		return nil, err
+	}
+	response["list"] = cleanList
+	return json.Marshal(response)
 }
 
 // fetchUserSession 从百度接口获取 uk 与 sk
 func (s *Server) fetchUserSession() (int64, string, error) {
 	// 1. 尝试从 /youth/api/user/getinfo 获取 uk/sk
 	apiURL := fmt.Sprintf(
-		"https://pan.baidu.com/youth/api/user/getinfo?app_id=%s&clienttype=0&web=1&need_selfinfo=1",
+		s.baiduBaseURL+"/youth/api/user/getinfo?app_id=%s&clienttype=0&web=1&need_selfinfo=1",
 		url.QueryEscape(s.cfg.BaiduAppID),
 	)
 	body, err := s.baiduGet(apiURL, "")
@@ -328,7 +540,7 @@ func (s *Server) fetchUserSession() (int64, string, error) {
 		var resp struct {
 			Errno   int `json:"errno"`
 			Records []struct {
-				Uk int64 `json:"uk"`
+				Uk int64  `json:"uk"`
 				Sk string `json:"sk"`
 			} `json:"records"`
 		}
@@ -340,12 +552,12 @@ func (s *Server) fetchUserSession() (int64, string, error) {
 
 	// 2. 如果不完整，从 /api/gettemplatevariable 获取
 	if uk == 0 || sk == "" {
-		fallbackURL := `https://pan.baidu.com/api/gettemplatevariable?fields=["bdstoken","uk","sk"]`
+		fallbackURL := s.baiduBaseURL + `/api/gettemplatevariable?fields=["bdstoken","uk","sk"]`
 		body2, err2 := s.baiduGet(fallbackURL, "")
 		if err2 == nil {
 			var resp2 struct {
 				Result struct {
-					Uk int64 `json:"uk"`
+					Uk int64  `json:"uk"`
 					Sk string `json:"sk"`
 				} `json:"result"`
 			}
@@ -363,7 +575,7 @@ func (s *Server) fetchUserSession() (int64, string, error) {
 	// 3. 如果还是没有 sk，从 /youth/api/report/user 获取
 	if sk == "" && uk != 0 {
 		skURL := fmt.Sprintf(
-			"https://pan.baidu.com/youth/api/report/user?app_id=%s&clienttype=0&web=1&action=sapi_auth&timestamp=%d",
+			s.baiduBaseURL+"/youth/api/report/user?app_id=%s&clienttype=0&web=1&action=sapi_auth&timestamp=%d",
 			url.QueryEscape(s.cfg.BaiduAppID),
 			time.Now().UnixMilli(),
 		)
@@ -398,7 +610,7 @@ func (s *Server) getSession() (int64, string, error) {
 	}
 	s.uk = uk
 	s.sk = sk
-	log.Printf("[Session] 获取成功, uk: %d, sk: %s", uk, sk)
+	log.Printf("[Session] 获取成功, uk: %d", uk)
 	return uk, sk, nil
 }
 
@@ -442,6 +654,9 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 		s.cache.mu.RUnlock()
 		return "", fmt.Errorf("在缓存中找不到路径: %s", filePath)
 	}
+	if cachedDLink, ok := s.cache.getCachedDLink(filePath); ok {
+		return withPrivateCacheControl(cachedDLink), nil
+	}
 
 	// 2. 获取或刷新 uk/sk
 	uk, sk, err := s.getSession()
@@ -449,25 +664,16 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 		return "", fmt.Errorf("获取百度Session失败: %w", err)
 	}
 
-	// 3. 计算签名并调用 locatedownload
-	nowMilli := time.Now().UnixMilli()
-	randVal := locatedownloadRand(uk, sk, nowMilli)
-	signVal := locatedownloadSign(meta.MD5, strconv.FormatInt(meta.FsID, 10), uk, nowMilli)
-	dpLogID := strconv.FormatInt(time.Now().UnixNano(), 10)
-
-	locateURL := fmt.Sprintf(
-		"https://pan.baidu.com/youth/api/locatedownload?app_id=%s&clienttype=0&web=1&devuid=0&dp-logid=%s&path=%s&rand=%s&sign=%s&time=%d",
-		url.QueryEscape(s.cfg.BaiduAppID),
-		dpLogID,
-		url.QueryEscape(filePath),
-		randVal,
-		signVal,
-		nowMilli,
-	)
-
-	body, err := s.baiduGet(locateURL, ua)
-	if err != nil {
-		log.Printf("[WARN] 首次 locatedownload 失败: %v，尝试清除sk并重试", err)
+	// 3. 计算签名并调用 locatedownload。百度有时会用 HTTP 200 返回
+	// errno 错误，因此响应解析失败也必须进入一次 Session 刷新重试。
+	body, err := s.requestDLink(filePath, meta, uk, sk, ua)
+	dlink, parseErr := parseDLinkResponse(body)
+	if err != nil || parseErr != nil {
+		if err != nil {
+			log.Printf("[WARN] 首次 locatedownload 失败: %v，尝试清除 sk 并重试", err)
+		} else {
+			log.Printf("[WARN] 首次 locatedownload 返回错误: %v，尝试清除 sk 并重试", parseErr)
+		}
 		s.sessionMu.Lock()
 		s.sk = ""
 		s.sessionMu.Unlock()
@@ -476,55 +682,83 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("重新获取Session失败: %w", err)
 		}
-
-		nowMilli = time.Now().UnixMilli()
-		randVal = locatedownloadRand(uk, sk, nowMilli)
-		signVal = locatedownloadSign(meta.MD5, strconv.FormatInt(meta.FsID, 10), uk, nowMilli)
-		dpLogID = strconv.FormatInt(time.Now().UnixNano(), 10)
-
-		locateURL = fmt.Sprintf(
-			"https://pan.baidu.com/youth/api/locatedownload?app_id=%s&clienttype=0&web=1&devuid=0&dp-logid=%s&path=%s&rand=%s&sign=%s&time=%d",
-			url.QueryEscape(s.cfg.BaiduAppID),
-			dpLogID,
-			url.QueryEscape(filePath),
-			randVal,
-			signVal,
-			nowMilli,
-		)
-		body, err = s.baiduGet(locateURL, ua)
+		body, err = s.requestDLink(filePath, meta, uk, sk, ua)
+		if err != nil {
+			return "", fmt.Errorf("重试 locatedownload 失败: %w", err)
+		}
+		dlink, err = parseDLinkResponse(body)
 		if err != nil {
 			return "", fmt.Errorf("重试 locatedownload 失败: %w", err)
 		}
 	}
 
-	var respLocate struct {
-		Errno   int    `json:"errno"`
-		ShowMsg string `json:"show_msg"`
-		URL     string `json:"url"`
-	}
-	if err := json.Unmarshal(body, &respLocate); err != nil {
-		return "", fmt.Errorf("解析 locatedownload 响应失败: %w", err)
-	}
-
-	if respLocate.Errno != 0 || respLocate.URL == "" {
-		return "", fmt.Errorf("百度 locatedownload 返回错误 errno=%d, msg=%q", respLocate.Errno, respLocate.ShowMsg)
-	}
-
-	dlink := respLocate.URL
-	if !strings.Contains(dlink, "response-cache-control=") {
-		sep := "&"
-		if !strings.Contains(dlink, "?") {
-			sep = "?"
-		}
-		dlink += sep + "response-cache-control=private"
-	}
+	dlink = withPrivateCacheControl(dlink)
+	s.cache.setDLink(filePath, dlink)
 
 	return dlink, nil
 }
 
+func withPrivateCacheControl(dlink string) string {
+	if strings.Contains(dlink, "response-cache-control=") {
+		return dlink
+	}
+	sep := "&"
+	if !strings.Contains(dlink, "?") {
+		sep = "?"
+	}
+	return dlink + sep + "response-cache-control=private"
+}
+
+func (s *Server) requestDLink(filePath string, meta fileMeta, uk int64, sk, ua string) ([]byte, error) {
+	nowMilli := time.Now().UnixMilli()
+	randVal := locatedownloadRand(uk, sk, nowMilli)
+	signVal := locatedownloadSign(meta.MD5, strconv.FormatInt(meta.FsID, 10), uk, nowMilli)
+	locateURL := fmt.Sprintf(
+		s.baiduBaseURL+"/youth/api/locatedownload?app_id=%s&clienttype=0&web=1&devuid=0&dp-logid=%d&path=%s&rand=%s&sign=%s&time=%d",
+		url.QueryEscape(s.cfg.BaiduAppID),
+		time.Now().UnixNano(),
+		url.QueryEscape(filePath),
+		randVal,
+		signVal,
+		nowMilli,
+	)
+	return s.baiduGet(locateURL, ua)
+}
+
+func parseDLinkResponse(body []byte) (string, error) {
+	var resp struct {
+		Errno   int    `json:"errno"`
+		ShowMsg string `json:"show_msg"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("解析 locatedownload 响应失败: %w", err)
+	}
+	if resp.Errno != 0 || resp.URL == "" {
+		return "", fmt.Errorf("百度 locatedownload 返回错误 errno=%d, msg=%q", resp.Errno, resp.ShowMsg)
+	}
+	return resp.URL, nil
+}
+
 // handleDownload 获取百度网盘文件直链并返回
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	filePath := r.URL.Query().Get("path")
+	var filePath string
+	format := r.URL.Query().Get("format")
+	if r.Method == http.MethodPost {
+		// POST 请求把路径放在请求体中，避免出现在 URL、历史记录和代理访问日志里。
+		r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+		var request struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "请求体格式错误", http.StatusBadRequest)
+			return
+		}
+		filePath = request.Path
+		format = "json"
+	} else {
+		filePath = r.URL.Query().Get("path")
+	}
 	if filePath == "" {
 		http.Error(w, "缺少 path 参数", http.StatusBadRequest)
 		return
@@ -536,28 +770,57 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. 调用公共方法获取百度直链
+	if format == "json" {
+		// 只返回不包含真实路径的短链接，真实直链在短链接请求时生成。
+		token, err := s.shortLinks.create(filePath)
+		if err != nil {
+			log.Printf("[ERROR] 创建短链接失败: %v", err)
+			http.Error(w, "创建短链接失败", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		respJSON, err := downloadJSONResponse("/d/" + token)
+		if err != nil {
+			http.Error(w, "生成直链响应失败", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(respJSON)
+		return
+	}
+
+	s.redirectToBaiduDownload(w, r, filePath)
+}
+
+func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/d/")
+	filePath, ok := s.shortLinks.resolve(token)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.redirectToBaiduDownload(w, r, filePath)
+}
+
+func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request, filePath string) {
 	dlink, err := s.getBaiduDLink(filePath, r.Header.Get("User-Agent"))
 	if err != nil {
 		log.Printf("[ERROR] 获取百度直链失败: %v", err)
 		http.Error(w, "获取直链失败", http.StatusBadGateway)
 		return
 	}
-
-	format := r.URL.Query().Get("format")
-	if format == "json" {
-		// 返回 JSON 格式直链供前端处理
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		respJSON := fmt.Sprintf(`{"urls":[{"url":%q}]}`, dlink)
-		w.Write([]byte(respJSON)) //nolint:errcheck
-	} else {
-		// 浏览器直接请求时，直接重定向到真实的直链以触发直接下载
-		http.Redirect(w, r, dlink, http.StatusFound)
-	}
+	// 浏览器直接请求时，重定向到真实直链以触发下载。
+	http.Redirect(w, r, dlink, http.StatusFound)
 }
 
-
-
+func downloadJSONResponse(dlink string) ([]byte, error) {
+	return json.Marshal(struct {
+		URLs []struct {
+			URL string `json:"url"`
+		} `json:"urls"`
+	}{URLs: []struct {
+		URL string `json:"url"`
+	}{{URL: dlink}}})
+}
 
 // ---------- 百度网盘请求 ----------
 
@@ -576,7 +839,10 @@ func (s *Server) baiduGet(apiURL string, ua string) ([]byte, error) {
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Referer", "https://pan.baidu.com/")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求百度网盘API失败: %w", err)
@@ -611,5 +877,13 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("临时盘启动，访问地址: http://localhost%s", addr)
-	log.Fatal(http.ListenAndServe(addr, srv.mux))
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           srv.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(server.ListenAndServe())
 }
