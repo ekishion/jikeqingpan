@@ -29,6 +29,7 @@ import (
 // Config 服务配置
 type Config struct {
 	Port               int    `json:"port"`
+	BindAddress        string `json:"bind_address"`
 	BaiduCookie        string `json:"baidu_cookie"`
 	RateLimitPerSecond int    `json:"rate_limit_per_second"`
 	BaiduAppID         string `json:"baidu_app_id"`
@@ -49,6 +50,9 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("port 必须在 1 到 65535 之间")
 	}
+	if strings.TrimSpace(cfg.BindAddress) == "" {
+		cfg.BindAddress = "127.0.0.1"
+	}
 	if cfg.RateLimitPerSecond == 0 {
 		cfg.RateLimitPerSecond = 10
 	}
@@ -65,10 +69,11 @@ func loadConfig(path string) (*Config, error) {
 
 // RateLimiter 简单的令牌桶频率限制器（按IP）
 type RateLimiter struct {
-	mu       sync.Mutex
-	clients  map[string]*clientState
-	rate     int // 每秒允许的请求数
-	interval time.Duration
+	mu          sync.Mutex
+	clients     map[string]*clientState
+	rate        int // 每秒允许的请求数
+	interval    time.Duration
+	lastCleanup time.Time
 }
 
 type clientState struct {
@@ -77,25 +82,19 @@ type clientState struct {
 }
 
 func newRateLimiter(ratePerSecond int) *RateLimiter {
-	rl := &RateLimiter{
-		clients:  make(map[string]*clientState),
-		rate:     ratePerSecond,
-		interval: time.Second,
+	if ratePerSecond < 1 {
+		ratePerSecond = 1
 	}
-	// 定期清理过期客户端记录
-	go func() {
-		for range time.Tick(time.Minute) {
-			rl.mu.Lock()
-			for ip, cs := range rl.clients {
-				if time.Since(cs.lastSeen) > 5*time.Minute {
-					delete(rl.clients, ip)
-				}
-			}
-			rl.mu.Unlock()
-		}
-	}()
+	rl := &RateLimiter{
+		clients:     make(map[string]*clientState),
+		rate:        ratePerSecond,
+		interval:    time.Second,
+		lastCleanup: time.Now(),
+	}
 	return rl
 }
+
+const maxRateLimiterClients = 10000
 
 // Allow 判断该IP是否被允许访问
 func (rl *RateLimiter) Allow(ip string) bool {
@@ -104,7 +103,28 @@ func (rl *RateLimiter) Allow(ip string) bool {
 
 	cs, ok := rl.clients[ip]
 	now := time.Now()
+	if now.Sub(rl.lastCleanup) >= time.Minute {
+		for clientIP, state := range rl.clients {
+			if now.Sub(state.lastSeen) > 5*time.Minute {
+				delete(rl.clients, clientIP)
+			}
+		}
+		rl.lastCleanup = now
+	}
 	if !ok {
+		if len(rl.clients) >= maxRateLimiterClients {
+			var oldestIP string
+			var oldest time.Time
+			for clientIP, state := range rl.clients {
+				if oldestIP == "" || state.lastSeen.Before(oldest) {
+					oldestIP = clientIP
+					oldest = state.lastSeen
+				}
+			}
+			if oldestIP != "" {
+				delete(rl.clients, oldestIP)
+			}
+		}
 		rl.clients[ip] = &clientState{tokens: rl.rate - 1, lastSeen: now}
 		return true
 	}
@@ -152,6 +172,8 @@ type fileMeta struct {
 	MD5           string    `json:"md5"`
 	DLink         string    `json:"dlink"`
 	DLinkCachedAt time.Time `json:"-"`
+	CachedAt      time.Time `json:"-"`
+	LastAccessAt  time.Time `json:"-"`
 }
 
 // fileListCache 缓存文件列表中每个文件的元数据，按路径索引
@@ -159,12 +181,30 @@ type fileListCache struct {
 	mu          sync.RWMutex
 	filesByPath map[string]fileMeta // 文件路径 -> 元数据
 	updatedAt   time.Time
+	maxEntries  int
+	ttl         time.Duration
 }
 
 const cachedDLinkTTL = 5 * time.Minute
+const fileMetaTTL = 15 * time.Minute
+const maxCachedFiles = 10000
 
 func newFileListCache() *fileListCache {
-	return &fileListCache{filesByPath: make(map[string]fileMeta)}
+	return newFileListCacheWithLimits(maxCachedFiles, fileMetaTTL)
+}
+
+func newFileListCacheWithLimits(maxEntries int, ttl time.Duration) *fileListCache {
+	if maxEntries < 1 {
+		maxEntries = maxCachedFiles
+	}
+	if ttl <= 0 {
+		ttl = fileMetaTTL
+	}
+	return &fileListCache{
+		filesByPath: make(map[string]fileMeta),
+		maxEntries:  maxEntries,
+		ttl:         ttl,
+	}
 }
 
 // update 解析 Baidu 列表响应并更新索引
@@ -183,12 +223,7 @@ func (c *fileListCache) update(listJSON []byte) {
 		return
 	}
 	if resp.Errno != 0 {
-		// 截取前 200 字节便于调试，不记录完整响应（可能包含 Cookie 等敏感信息）
-		preview := listJSON
-		if len(preview) > 200 {
-			preview = preview[:200]
-		}
-		log.Printf("[WARN] 百度API返回错误 errno=%d, 响应头: %s", resp.Errno, preview)
+		log.Printf("[WARN] 百度API返回错误 errno=%d", resp.Errno)
 		return
 	}
 	c.mu.Lock()
@@ -196,35 +231,58 @@ func (c *fileListCache) update(listJSON []byte) {
 	if c.filesByPath == nil {
 		c.filesByPath = make(map[string]fileMeta)
 	}
+	now := time.Now()
+	c.cleanupExpiredLocked(now)
 	for _, f := range resp.List {
 		if f.Path != "" && f.FsID != 0 {
+			dlinkCachedAt := time.Time{}
+			if f.DLink != "" {
+				dlinkCachedAt = now
+			}
 			c.filesByPath[f.Path] = fileMeta{
 				FsID:          f.FsID,
 				MD5:           f.MD5,
 				DLink:         f.DLink,
-				DLinkCachedAt: time.Now(),
+				DLinkCachedAt: dlinkCachedAt,
+				CachedAt:      now,
+				LastAccessAt:  now,
 			}
 		}
 	}
+	c.enforceLimitLocked()
 	c.updatedAt = time.Now()
 	log.Printf("[缓存] 更新完成：共 %d 个文件，当前总共已缓存 %d 个元数据", len(resp.List), len(c.filesByPath))
 }
 
 // getFileMeta 根据路径获取文件元数据
 func (c *fileListCache) getFileMeta(path string) (fileMeta, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	meta, ok := c.filesByPath[path]
+	if ok && !meta.CachedAt.IsZero() && time.Since(meta.CachedAt) >= c.ttl {
+		delete(c.filesByPath, path)
+		return fileMeta{}, false
+	}
+	if ok {
+		meta.LastAccessAt = time.Now()
+		c.filesByPath[path] = meta
+	}
 	return meta, ok
 }
 
 func (c *fileListCache) getCachedDLink(filePath string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	meta, ok := c.filesByPath[filePath]
-	if !ok || meta.DLink == "" || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
+	if ok && !meta.CachedAt.IsZero() && time.Since(meta.CachedAt) >= c.ttl {
+		delete(c.filesByPath, filePath)
 		return "", false
 	}
+	if !ok || meta.DLink == "" || meta.DLinkCachedAt.IsZero() || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
+		return "", false
+	}
+	meta.LastAccessAt = time.Now()
+	c.filesByPath[filePath] = meta
 	return meta.DLink, true
 }
 
@@ -237,7 +295,37 @@ func (c *fileListCache) setDLink(filePath, dlink string) {
 	}
 	meta.DLink = dlink
 	meta.DLinkCachedAt = time.Now()
+	meta.LastAccessAt = meta.DLinkCachedAt
 	c.filesByPath[filePath] = meta
+}
+
+func (c *fileListCache) cleanupExpiredLocked(now time.Time) {
+	for filePath, meta := range c.filesByPath {
+		if !meta.CachedAt.IsZero() && now.Sub(meta.CachedAt) >= c.ttl {
+			delete(c.filesByPath, filePath)
+		}
+	}
+}
+
+func (c *fileListCache) enforceLimitLocked() {
+	for len(c.filesByPath) > c.maxEntries {
+		var oldestPath string
+		var oldest time.Time
+		for filePath, meta := range c.filesByPath {
+			lastAccess := meta.LastAccessAt
+			if lastAccess.IsZero() {
+				lastAccess = meta.CachedAt
+			}
+			if oldestPath == "" || lastAccess.Before(oldest) {
+				oldestPath = filePath
+				oldest = lastAccess
+			}
+		}
+		if oldestPath == "" {
+			return
+		}
+		delete(c.filesByPath, oldestPath)
+	}
 }
 
 // ---------- 服务器 ----------
@@ -266,21 +354,33 @@ var shortLinkTokenRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
 type shortLink struct {
 	filePath  string
 	expiresAt time.Time
+	createdAt time.Time
 }
 
 type shortLinkStore struct {
-	mu    sync.Mutex
-	links map[string]shortLink
-	ttl   time.Duration
+	mu         sync.Mutex
+	links      map[string]shortLink
+	ttl        time.Duration
+	maxEntries int
 }
 
 func newShortLinkStore(ttl time.Duration) *shortLinkStore {
+	return newShortLinkStoreWithLimits(ttl, maxShortLinks)
+}
+
+const maxShortLinks = 10000
+
+func newShortLinkStoreWithLimits(ttl time.Duration, maxEntries int) *shortLinkStore {
 	if ttl <= 0 {
 		ttl = shortLinkTTL
 	}
+	if maxEntries < 1 {
+		maxEntries = maxShortLinks
+	}
 	return &shortLinkStore{
-		links: make(map[string]shortLink),
-		ttl:   ttl,
+		links:      make(map[string]shortLink),
+		ttl:        ttl,
+		maxEntries: maxEntries,
 	}
 }
 
@@ -294,6 +394,20 @@ func (s *shortLinkStore) create(filePath string) (string, error) {
 			delete(s.links, token)
 		}
 	}
+	for len(s.links) >= s.maxEntries {
+		var oldestToken string
+		var oldest time.Time
+		for token, link := range s.links {
+			if oldestToken == "" || link.createdAt.Before(oldest) {
+				oldestToken = token
+				oldest = link.createdAt
+			}
+		}
+		if oldestToken == "" {
+			break
+		}
+		delete(s.links, oldestToken)
+	}
 
 	for i := 0; i < 3; i++ {
 		buf := make([]byte, 16)
@@ -304,7 +418,7 @@ func (s *shortLinkStore) create(filePath string) (string, error) {
 		if _, exists := s.links[token]; exists {
 			continue
 		}
-		s.links[token] = shortLink{filePath: filePath, expiresAt: now.Add(s.ttl)}
+		s.links[token] = shortLink{filePath: filePath, expiresAt: now.Add(s.ttl), createdAt: now}
 		return token, nil
 	}
 	return "", fmt.Errorf("生成短链接令牌失败: 随机令牌冲突")
@@ -591,7 +705,7 @@ func (s *Server) fetchUserSession() (int64, string, error) {
 	}
 
 	if uk == 0 || sk == "" {
-		return 0, "", fmt.Errorf("无法从百度网盘获取完整的 uk (%d) 或 sk (%q)", uk, sk)
+		return 0, "", fmt.Errorf("无法从百度网盘获取完整的 Session uk=%d，sk 缺失或无效", uk)
 	}
 
 	return uk, sk, nil
@@ -646,12 +760,6 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 	}
 
 	if !ok {
-		// 调试：列出当前缓存中所有路径
-		s.cache.mu.RLock()
-		for p := range s.cache.filesByPath {
-			log.Printf("[调试] 缓存中有路径: %q", p)
-		}
-		s.cache.mu.RUnlock()
 		return "", fmt.Errorf("在缓存中找不到路径: %s", filePath)
 	}
 	if cachedDLink, ok := s.cache.getCachedDLink(filePath); ok {
@@ -875,8 +983,8 @@ func main() {
 
 	srv := newServer(cfg)
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("临时盘启动，访问地址: http://localhost%s", addr)
+	addr := net.JoinHostPort(cfg.BindAddress, strconv.Itoa(cfg.Port))
+	log.Printf("临时盘启动，访问地址: http://%s", addr)
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           srv.mux,

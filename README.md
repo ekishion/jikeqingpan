@@ -16,11 +16,14 @@
 ```json
 {
   "port": 8080, #监听端口
+  "bind_address": "127.0.0.1", #默认仅监听本机；远程访问请明确配置并增加认证/HTTPS
   "baidu_cookie": "", #百度网盘青春版Cookie
   "rate_limit_per_second": 10, #网页请求速度限制
   "baidu_app_id": "250528"
 }
 ```
+
+`config.json` 仅用于本地运行，自行创建
 
 
 
