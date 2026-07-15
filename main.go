@@ -472,10 +472,16 @@ func newServer(cfg *Config) *Server {
 // withSecurity 统一安全中间件：添加安全响应头 + 频率限制
 func (s *Server) withSecurity(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 查询接口允许 GET；文件列表和短链接申请允许带 CSRF 令牌的 POST。
-		isProtectedPost := r.Method == http.MethodPost &&
-			(r.URL.Path == "/api/download" || r.URL.Path == "/api/files")
-		if r.Method != http.MethodGet && !isProtectedPost {
+		// 短链接申请只允许 POST；文件列表允许 POST（前端）与 GET（兼容）。
+		// 真实下载只走 GET /d/{token}，不再提供 GET /api/download 以免绕过 CSRF。
+		isDownloadAPI := r.URL.Path == "/api/download"
+		isFilesAPI := r.URL.Path == "/api/files"
+		isProtectedPost := r.Method == http.MethodPost && (isDownloadAPI || isFilesAPI)
+		switch {
+		case isDownloadAPI && r.Method != http.MethodPost:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+			return
+		case r.Method != http.MethodGet && !isProtectedPost:
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 			return
 		}
@@ -558,17 +564,83 @@ func hasValidCSRFToken(r *http.Request) bool {
 
 // ---------- API处理 ----------
 
-// fetchFileList 拉取百度网盘文件列表。下载直链只在服务端按需生成。
+const (
+	fileListPageSize = 100
+	fileListMaxPages = 50
+)
+
+// fetchFileList 拉取百度网盘文件列表（自动翻页）。下载直链只在服务端按需生成。
 func (s *Server) fetchFileList(dir string) ([]byte, error) {
 	if dir == "" {
 		dir = "/"
 	}
-	apiURL := fmt.Sprintf(
-		s.baiduBaseURL+"/youth/api/list?clienttype=0&app_id=%s&web=1&order=time&desc=1&num=100&page=1&dlink=1&dir=%s",
-		url.QueryEscape(s.cfg.BaiduAppID),
-		url.QueryEscape(dir),
+
+	var (
+		mergedList []json.RawMessage
+		baseResp   map[string]json.RawMessage
 	)
-	return s.baiduGet(apiURL, "")
+
+	for page := 1; page <= fileListMaxPages; page++ {
+		apiURL := fmt.Sprintf(
+			s.baiduBaseURL+"/youth/api/list?clienttype=0&app_id=%s&web=1&order=time&desc=1&num=%d&page=%d&dlink=1&dir=%s",
+			url.QueryEscape(s.cfg.BaiduAppID),
+			fileListPageSize,
+			page,
+			url.QueryEscape(dir),
+		)
+		body, err := s.baiduGet(apiURL, "")
+		if err != nil {
+			return nil, err
+		}
+
+		var resp map[string]json.RawMessage
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("解析文件列表失败: %w", err)
+		}
+		if page == 1 {
+			baseResp = resp
+		}
+
+		// 百度业务错误（errno!=0）直接返回原始响应，由上层/缓存逻辑处理。
+		if errnoRaw, ok := resp["errno"]; ok {
+			var errno int
+			if json.Unmarshal(errnoRaw, &errno) == nil && errno != 0 {
+				if page == 1 {
+					return body, nil
+				}
+				break
+			}
+		}
+
+		listRaw, ok := resp["list"]
+		if !ok {
+			if page == 1 {
+				return body, nil
+			}
+			break
+		}
+		var pageList []json.RawMessage
+		if err := json.Unmarshal(listRaw, &pageList); err != nil {
+			return nil, fmt.Errorf("解析文件列表 list 失败: %w", err)
+		}
+		mergedList = append(mergedList, pageList...)
+		if len(pageList) < fileListPageSize {
+			break
+		}
+		if page == fileListMaxPages {
+			log.Printf("[WARN] 目录 %q 达到翻页上限 %d 页（每页 %d），可能仍有未加载文件", dir, fileListMaxPages, fileListPageSize)
+		}
+	}
+
+	if baseResp == nil {
+		return nil, fmt.Errorf("文件列表响应为空")
+	}
+	cleanList, err := json.Marshal(mergedList)
+	if err != nil {
+		return nil, err
+	}
+	baseResp["list"] = cleanList
+	return json.Marshal(baseResp)
 }
 
 // handleFiles 获取文件列表，代理百度网盘 list API
@@ -817,6 +889,27 @@ func withPrivateCacheControl(dlink string) string {
 	return dlink + sep + "response-cache-control=private"
 }
 
+// isAllowedBaiduDownloadURL 校验直链是否指向百度下载相关域名，避免异常响应造成开放重定向。
+func isAllowedBaiduDownloadURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "baidu.com" || host == "baidupcs.com" || host == "bdstatic.com" {
+		return true
+	}
+	for _, suffix := range []string{".baidu.com", ".baidupcs.com", ".bdstatic.com"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) requestDLink(filePath string, meta fileMeta, uk int64, sk, ua string) ([]byte, error) {
 	nowMilli := time.Now().UnixMilli()
 	randVal := locatedownloadRand(uk, sk, nowMilli)
@@ -845,28 +938,29 @@ func parseDLinkResponse(body []byte) (string, error) {
 	if resp.Errno != 0 || resp.URL == "" {
 		return "", fmt.Errorf("百度 locatedownload 返回错误 errno=%d, msg=%q", resp.Errno, resp.ShowMsg)
 	}
+	if !isAllowedBaiduDownloadURL(resp.URL) {
+		return "", fmt.Errorf("百度 locatedownload 返回了非白名单下载地址")
+	}
 	return resp.URL, nil
 }
 
-// handleDownload 获取百度网盘文件直链并返回
+// handleDownload 仅创建不透明短链接；真实百度直链在 /d/{token} 时再解析。
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	var filePath string
-	format := r.URL.Query().Get("format")
-	if r.Method == http.MethodPost {
-		// POST 请求把路径放在请求体中，避免出现在 URL、历史记录和代理访问日志里。
-		r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
-		var request struct {
-			Path string `json:"path"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			http.Error(w, "请求体格式错误", http.StatusBadRequest)
-			return
-		}
-		filePath = request.Path
-		format = "json"
-	} else {
-		filePath = r.URL.Query().Get("path")
+	if r.Method != http.MethodPost {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
 	}
+
+	// POST 请求把路径放在请求体中，避免出现在 URL、历史记录和代理访问日志里。
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var request struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "请求体格式错误", http.StatusBadRequest)
+		return
+	}
+	filePath := request.Path
 	if filePath == "" {
 		http.Error(w, "缺少 path 参数", http.StatusBadRequest)
 		return
@@ -878,25 +972,19 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if format == "json" {
-		// 只返回不包含真实路径的短链接，真实直链在短链接请求时生成。
-		token, err := s.shortLinks.create(filePath)
-		if err != nil {
-			log.Printf("[ERROR] 创建短链接失败: %v", err)
-			http.Error(w, "创建短链接失败", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		respJSON, err := downloadJSONResponse("/d/" + token)
-		if err != nil {
-			http.Error(w, "生成直链响应失败", http.StatusInternalServerError)
-			return
-		}
-		_, _ = w.Write(respJSON)
+	token, err := s.shortLinks.create(filePath)
+	if err != nil {
+		log.Printf("[ERROR] 创建短链接失败: %v", err)
+		http.Error(w, "创建短链接失败", http.StatusInternalServerError)
 		return
 	}
-
-	s.redirectToBaiduDownload(w, r, filePath)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	respJSON, err := downloadJSONResponse("/d/" + token)
+	if err != nil {
+		http.Error(w, "生成直链响应失败", http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write(respJSON)
 }
 
 func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
@@ -913,6 +1001,11 @@ func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request,
 	dlink, err := s.getBaiduDLink(filePath, r.Header.Get("User-Agent"))
 	if err != nil {
 		log.Printf("[ERROR] 获取百度直链失败: %v", err)
+		http.Error(w, "获取直链失败", http.StatusBadGateway)
+		return
+	}
+	if !isAllowedBaiduDownloadURL(dlink) {
+		log.Printf("[ERROR] 拒绝非白名单下载地址: %q", dlink)
 		http.Error(w, "获取直链失败", http.StatusBadGateway)
 		return
 	}
