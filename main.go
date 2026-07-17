@@ -171,6 +171,7 @@ type fileMeta struct {
 	FsID          int64     `json:"fs_id"`
 	MD5           string    `json:"md5"`
 	DLink         string    `json:"dlink"`
+	DLinkUA       string    `json:"-"` // 直链与申请时的 UA 绑定，避免跨 UA 复用失效
 	DLinkCachedAt time.Time `json:"-"`
 	CachedAt      time.Time `json:"-"`
 	LastAccessAt  time.Time `json:"-"`
@@ -235,14 +236,19 @@ func (c *fileListCache) update(listJSON []byte) {
 	c.cleanupExpiredLocked(now)
 	for _, f := range resp.List {
 		if f.Path != "" && f.FsID != 0 {
+			// 列表接口用默认 UA 拉取；仅当后续请求 UA 一致时才复用该 dlink。
+			dlink := f.DLink
+			dlinkUA := ""
 			dlinkCachedAt := time.Time{}
-			if f.DLink != "" {
+			if dlink != "" {
+				dlinkUA = defaultBaiduUA
 				dlinkCachedAt = now
 			}
 			c.filesByPath[f.Path] = fileMeta{
 				FsID:          f.FsID,
 				MD5:           f.MD5,
-				DLink:         f.DLink,
+				DLink:         dlink,
+				DLinkUA:       dlinkUA,
 				DLinkCachedAt: dlinkCachedAt,
 				CachedAt:      now,
 				LastAccessAt:  now,
@@ -270,7 +276,7 @@ func (c *fileListCache) getFileMeta(path string) (fileMeta, bool) {
 	return meta, ok
 }
 
-func (c *fileListCache) getCachedDLink(filePath string) (string, bool) {
+func (c *fileListCache) getCachedDLink(filePath, ua string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	meta, ok := c.filesByPath[filePath]
@@ -278,7 +284,9 @@ func (c *fileListCache) getCachedDLink(filePath string) (string, bool) {
 		delete(c.filesByPath, filePath)
 		return "", false
 	}
-	if !ok || meta.DLink == "" || meta.DLinkCachedAt.IsZero() || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
+	ua = normalizeDownloadUA(ua)
+	if !ok || meta.DLink == "" || meta.DLinkUA == "" || meta.DLinkUA != ua ||
+		meta.DLinkCachedAt.IsZero() || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
 		return "", false
 	}
 	meta.LastAccessAt = time.Now()
@@ -286,7 +294,7 @@ func (c *fileListCache) getCachedDLink(filePath string) (string, bool) {
 	return meta.DLink, true
 }
 
-func (c *fileListCache) setDLink(filePath, dlink string) {
+func (c *fileListCache) setDLink(filePath, dlink, ua string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	meta, ok := c.filesByPath[filePath]
@@ -294,6 +302,7 @@ func (c *fileListCache) setDLink(filePath, dlink string) {
 		return
 	}
 	meta.DLink = dlink
+	meta.DLinkUA = normalizeDownloadUA(ua)
 	meta.DLinkCachedAt = time.Now()
 	meta.LastAccessAt = meta.DLinkCachedAt
 	c.filesByPath[filePath] = meta
@@ -347,6 +356,8 @@ type Server struct {
 const (
 	shortLinkTTL        = time.Hour
 	csrfTokenCookieName = "csrf_token"
+	csrfTokenMaxAge     = 3600
+	defaultBaiduUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 )
 
 var shortLinkTokenRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -502,19 +513,18 @@ func (s *Server) withSecurity(next http.HandlerFunc) http.HandlerFunc {
 					http.Error(w, "生成安全令牌失败", http.StatusInternalServerError)
 					return
 				}
-				http.SetCookie(w, &http.Cookie{
-					Name:     csrfTokenCookieName,
-					Value:    token,
-					Path:     "/",
-					MaxAge:   3600,
-					SameSite: http.SameSiteLaxMode,
-					Secure:   r.TLS != nil,
-				})
+				setCSRFCookie(w, r, token)
 			}
 		}
-		if isProtectedPost && !hasValidCSRFToken(r) {
-			http.Error(w, "CSRF 令牌无效", http.StatusForbidden)
-			return
+		if isProtectedPost {
+			if !hasValidCSRFToken(r) {
+				http.Error(w, "CSRF 令牌无效", http.StatusForbidden)
+				return
+			}
+			// 有效 POST 滚动续期，避免长开页面后 cookie 过期导致持续 403。
+			if cookie, err := r.Cookie(csrfTokenCookieName); err == nil && cookie.Value != "" {
+				setCSRFCookie(w, r, cookie.Value)
+			}
 		}
 
 		// TODO(security): 当前仅限本地访问，如需对外开放需添加认证（OAuth/JWT）
@@ -550,6 +560,17 @@ func newCSRFToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+func setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfTokenCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   csrfTokenMaxAge,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
+}
+
 func hasValidCSRFToken(r *http.Request) bool {
 	cookie, err := r.Cookie(csrfTokenCookieName)
 	if err != nil || cookie.Value == "" {
@@ -562,11 +583,20 @@ func hasValidCSRFToken(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(headerToken)) == 1
 }
 
+func normalizeDownloadUA(ua string) string {
+	ua = strings.TrimSpace(ua)
+	if ua == "" {
+		return defaultBaiduUA
+	}
+	return ua
+}
+
 // ---------- API处理 ----------
 
 const (
 	fileListPageSize = 100
-	fileListMaxPages = 50
+	// 单次列表请求的翻页上限。需与 WriteTimeout、百度客户端超时一起估算最坏耗时。
+	fileListMaxPages = 15
 )
 
 // fetchFileList 拉取百度网盘文件列表（自动翻页）。下载直链只在服务端按需生成。
@@ -834,7 +864,8 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("在缓存中找不到路径: %s", filePath)
 	}
-	if cachedDLink, ok := s.cache.getCachedDLink(filePath); ok {
+	ua = normalizeDownloadUA(ua)
+	if cachedDLink, ok := s.cache.getCachedDLink(filePath, ua); ok {
 		return withPrivateCacheControl(cachedDLink), nil
 	}
 
@@ -873,7 +904,7 @@ func (s *Server) getBaiduDLink(filePath string, ua string) (string, error) {
 	}
 
 	dlink = withPrivateCacheControl(dlink)
-	s.cache.setDLink(filePath, dlink)
+	s.cache.setDLink(filePath, dlink, ua)
 
 	return dlink, nil
 }
@@ -1034,10 +1065,7 @@ func (s *Server) baiduGet(apiURL string, ua string) ([]byte, error) {
 
 	// Cookie只在服务端注入，绝不返回给客户端
 	req.Header.Set("Cookie", s.cfg.BaiduCookie)
-	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-	}
-	req.Header.Set("User-Agent", ua)
+	req.Header.Set("User-Agent", normalizeDownloadUA(ua))
 	req.Header.Set("Referer", "https://pan.baidu.com/")
 
 	client := s.httpClient
@@ -1083,8 +1111,9 @@ func main() {
 		Handler:           srv.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// 列表翻页与下载冷启动会串行请求百度；需覆盖最坏路径（约 15 页 × 客户端超时）。
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 	log.Fatal(server.ListenAndServe())
 }

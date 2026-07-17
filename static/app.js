@@ -160,12 +160,10 @@ function loadFiles(dir) {
   countEl.textContent = '读取中…';
   refreshBtn.disabled = true;
 
-  fetch('/api/files', {
+  apiFetch('/api/files', {
     method: 'POST',
-    credentials: 'same-origin',
     headers: {
-      'Content-Type': 'application/json',
-      'X-CSRF-Token': getCookie('csrf_token') || ''
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({ dir: targetDir })
   })
@@ -365,8 +363,9 @@ function downloadFile(filePath, fileName) {
 
   requestShortLink(filePath)
     .then(function(downloadUrl) {
-      // 短链接会在服务端生成百度直链并重定向，前端不再暴露文件路径。
-      window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+      // 使用当前页跳转，避免异步 window.open 被浏览器拦截。
+      // 短链会 302 到百度直链；返回可用浏览器后退。
+      window.location.assign(downloadUrl);
       showToast('✅ 唤起下载：' + fileName);
     })
     .catch(function(err) {
@@ -390,13 +389,10 @@ function copyLink(filePath) {
 }
 
 function requestShortLink(filePath) {
-  const csrfToken = getCookie('csrf_token');
-  return fetch('/api/download', {
+  return apiFetch('/api/download', {
     method: 'POST',
-    credentials: 'same-origin',
     headers: {
-      'Content-Type': 'application/json',
-      'X-CSRF-Token': csrfToken || ''
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({ path: filePath })
   })
@@ -410,6 +406,45 @@ function requestShortLink(filePath) {
         throw new Error('短链接为空');
       }
       return new URL(urls[0].url, window.location.origin).href;
+    });
+}
+
+/** 带 CSRF 的 same-origin 请求；403 时尝试刷新 cookie 并重试一次 */
+function apiFetch(url, options) {
+  options = options || {};
+  const headers = Object.assign({}, options.headers || {});
+  headers['X-CSRF-Token'] = getCookie('csrf_token') || '';
+
+  const init = Object.assign({}, options, {
+    credentials: 'same-origin',
+    headers: headers
+  });
+
+  return fetch(url, init).then(function(resp) {
+    if (resp.status !== 403 || init._csrfRetried) {
+      return resp;
+    }
+    return refreshCsrfCookie().then(function(ok) {
+      if (!ok) return resp;
+      const retryHeaders = Object.assign({}, options.headers || {});
+      retryHeaders['X-CSRF-Token'] = getCookie('csrf_token') || '';
+      return fetch(url, Object.assign({}, options, {
+        credentials: 'same-origin',
+        headers: retryHeaders,
+        _csrfRetried: true
+      }));
+    });
+  });
+}
+
+function refreshCsrfCookie() {
+  // GET 首页会在缺失/需要时下发 csrf_token cookie。
+  return fetch('/', { method: 'GET', credentials: 'same-origin', cache: 'no-store' })
+    .then(function(resp) {
+      return resp.ok && !!getCookie('csrf_token');
+    })
+    .catch(function() {
+      return false;
     });
 }
 
