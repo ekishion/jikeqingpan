@@ -1,0 +1,23 @@
+# VCS / local caches
+.git
+.gocache
+.gotmp
+
+# build artifacts
+cmd
+*.exe
+*.test
+
+# secrets & local env
+config.json
+.env
+.env.*
+!.env.example
+
+# not needed in image build context
+README.md
+**/*_test.go
+.dockerignore
+Dockerfile
+docker-compose.yml
+docs

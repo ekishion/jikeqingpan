@@ -1,0 +1,39 @@
+services:
+  jikeqingpan:
+    build: .
+    image: jikeqingpan:latest
+    container_name: jikeqingpan
+    restart: unless-stopped
+    ports:
+      # VPS 建议只绑本机，再由 Nginx/Caddy 做 HTTPS 反代
+      - "127.0.0.1:4172:4172"
+    # 需要时取消注释，并复制 .env.example 为 .env
+    # env_file:
+    #   - .env
+    environment:
+      TZ: Asia/Shanghai
+      CONFIG_PATH: /data/config.json
+      # 容器内必须监听 0.0.0.0（会覆盖 config.json 里的 bind_address）
+      BIND_ADDRESS: "0.0.0.0"
+      PORT: "4172"
+      # 经 HTTPS 反代时建议打开（强制 Cookie Secure）
+      # FORCE_SECURE_COOKIE: "true"
+      # 也可用环境变量覆盖配置文件中的敏感字段（优先级更高）
+      # BAIDU_COOKIE: "..."
+      # ACCESS_TOKEN: "..."
+    volumes:
+      # 与本地开发共用同一份 config.json（只读挂载）
+      - ./config.json:/data/config.json:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4172/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -2,17 +2,19 @@
 
 基于**百度网盘青春版**的临时中转网盘。
 
-- 后端：Go
-- 前端：静态 HTML / JS
-- Cookie 仅保存在服务端，不暴露给浏览器
+- 后端：Go（标准库，无第三方依赖）
+- 前端：静态 HTML / JS（`go:embed` 打进二进制）
+- Cookie 只保存在服务端，不暴露给浏览器
+- **VPS 给少数人用**：配置 `access_token` 启用访问控制
 
 ## 功能
 
 - 浏览网盘目录（支持文件夹、自动翻页合并）
 - 申请不透明短链后下载（路径不出现在下载 URL）
-- 复制短链分享（有效期内可重复访问）
+- 复制短链分享（有效期内可重复访问；若开启鉴权，接收方也需已登录）
 - 服务端限流、CSRF 保护、直链域名白名单
 - 直链缓存按 User-Agent 绑定，避免跨浏览器复用失效
+- 健康检查 `/healthz`、就绪检查 `/readyz`（需鉴权）
 
 ## 截图
 
@@ -22,146 +24,62 @@
 
 ### 1. 准备配置
 
-在项目根目录自行创建 `config.json`（**不要提交到 Git**）：
-
-```json
-{
-  "port": 8080,
-  "bind_address": "127.0.0.1",
-  "baidu_cookie": "你的百度网盘青春版 Cookie",
-  "rate_limit_per_second": 10,
-  "baidu_app_id": "250528"
-}
+```bash
+cp config.example.json config.json
 ```
 
-### 2. 构建
+编辑 `config.json`：至少填写 `baidu_cookie`；公网/VPS 务必设置 `access_token`。
 
 ```bash
-go build -o cmd/bin/main main.go
+# 生成访问令牌示例
+openssl rand -hex 24
 ```
 
-Windows 示例：
+> Docker 容器内用环境变量 `BIND_ADDRESS=0.0.0.0` 覆盖监听地址即可。
+
+完整字段说明见 [docs/configuration.md](docs/configuration.md)。
+
+### 2. 运行
+
+```bash
+# 开发
+go run . -config config.json
+
+# 发布构建
+bash build.sh
+./cmd/bin/main -config config.json
+```
+
+Windows PowerShell：
 
 ```powershell
-go build -o cmd/bin/main.exe main.go
+go run . -config config.json
+# 或
+go build -o cmd/bin/main.exe .
+.\cmd/bin\main.exe -config config.json
 ```
 
-或使用脚本：
+浏览器访问：`http://127.0.0.1:4172`
+
+### 3. Docker（可选）
 
 ```bash
-bash build.sh
+cp config.example.json config.json   # 填好 cookie / token
+docker compose up -d --build
+curl -sS http://127.0.0.1:4172/healthz
 ```
 
-> 部分杀软（如卡巴斯基）可能对 Go 编译出的网络程序产生 `not-a-virus:NetTool` 启发式误报。开发时可对项目目录与 Go 安装目录加排除。
+详见 [docs/deployment.md](docs/deployment.md)。
 
-### 3. 运行
+## 文档索引
 
-```bash
-./cmd/bin/main
-```
-
-浏览器访问：
-
-```text
-http://127.0.0.1:8080
-```
-
-> 默认只监听本机。若需远程访问，请自行配置反向代理、认证与 HTTPS，并明确设置 `bind_address`。公网暴露时务必加访问控制——本服务本身没有多用户鉴权。
-
-## 配置说明
-
-| 字段 | 说明 |
+| 文档 | 内容 |
 | --- | --- |
-| `port` | 监听端口，默认 `8080` |
-| `bind_address` | 绑定地址，默认 `127.0.0.1` |
-| `baidu_cookie` | 百度网盘青春版 Cookie（敏感信息） |
-| `rate_limit_per_second` | API 限流（每 IP 每秒） |
-| `baidu_app_id` | 百度 App ID，默认 `250528` |
-
-## 下载流程
-
-1. 前端 `POST /api/download`（需 CSRF）申请短链
-2. 服务端返回不透明路径：`/d/{token}`
-3. 浏览器访问短链，服务端按当前 User-Agent 解析/缓存百度直链并 `302` 跳转
-
-真实文件路径不会出现在下载 URL 中。前端下载使用当前页跳转（`location.assign`），避免异步弹窗被浏览器拦截。
-
-## HTTP API
-
-### 获取文件列表
-
-```http
-POST /api/files
-Content-Type: application/json
-X-CSRF-Token: <csrf_token>
-```
-
-```json
-{
-  "dir": "/"
-}
-```
-
-说明：
-
-- 也兼容 `GET /api/files?dir=/`
-- 响应中的 `dlink` 会在返回前剥离，仅缓存于服务端
-- 目录列表会自动翻页合并（默认每页 100 条，单次最多约 15 页；超限会打 WARN 日志）
-- `POST` 需要 CSRF；页面长开时有效请求会滚动续期 CSRF Cookie，前端在 403 时会尝试刷新后重试一次
-
-### 申请下载短链
-
-```http
-POST /api/download
-Content-Type: application/json
-X-CSRF-Token: <csrf_token>
-```
-
-```json
-{
-  "path": "/示例目录/文件.zip"
-}
-```
-
-响应示例：
-
-```json
-{
-  "urls": [
-    {
-      "url": "/d/0123456789abcdef0123456789abcdef"
-    }
-  ]
-}
-```
-
-> `GET /api/download` 已禁用，避免绕过 CSRF 并在查询串中暴露路径。
-
-### 通过短链下载
-
-```http
-GET /d/{token}
-```
-
-服务端校验 token 后重定向到百度直链。
-
-- 短链默认有效期 **1 小时**
-- token 为 32 位随机 hex
-- 直链缓存默认约 **5 分钟**，并与请求 User-Agent 绑定
-- 仅允许跳转到百度相关 HTTPS 域名白名单
-
-## 安全说明
-
-- 默认绑定 `127.0.0.1`，降低误暴露风险
-- `baidu_cookie` 仅服务端使用
-- 状态变更接口需要 CSRF（Cookie + `X-CSRF-Token` 双提交；有效 POST 会续期）
-- 下载短链为 32 位随机 hex，不包含真实路径
-- 百度直链仅允许 `https` 与百度相关域名白名单
-- 限流基于客户端 IP（不信任未配置的 `X-Forwarded-For`）
-- 文件元数据 / 短链 / 限流客户端均有上限，防止内存无限增长
-- HTTP Server 配置了读写超时（写超时约 120 秒，覆盖列表翻页与下载冷启动）
-
-**请勿将 `config.json` 或 Cookie 提交到仓库。** 若历史中曾泄露 Cookie，请立即在百度侧轮换。
+| [docs/configuration.md](docs/configuration.md) | 配置字段、环境变量 |
+| [docs/deployment.md](docs/deployment.md) | Docker / VPS / 反向代理 |
+| [docs/api.md](docs/api.md) | HTTP API 与下载流程 |
+| [docs/security.md](docs/security.md) | 安全建议 |
+| [docs/development.md](docs/development.md) | 项目结构、开发与测试 |
 
 ## 参考
 

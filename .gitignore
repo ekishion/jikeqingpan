@@ -1,4 +1,9 @@
 config.json
-.gocache
+.gocache/
+.gotmp/
 *.exe
 cmd/bin/
+*.test
+.env
+.env.*
+!.env.example
