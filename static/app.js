@@ -96,7 +96,7 @@ function parseAPIError(resp, bodyText) {
   } catch (e) {
     /* plain text */
   }
-  if (resp.status === 401) return "需要访问令牌，请先登录";
+  if (resp.status === 401) return "未登录或访问令牌无效，请先输入 access_token 登录";
   if (resp.status === 403) return "CSRF 校验失败，请刷新页面重试";
   if (resp.status === 429) return "请求过于频繁，请稍后重试";
   if (resp.status >= 500) return "服务暂时不可用（HTTP " + resp.status + "）";
@@ -105,19 +105,148 @@ function parseAPIError(resp, bodyText) {
 
 // ===== 鉴权 =====
 
+function injectLoginStyles() {
+  if (document.getElementById("login-overlay-style")) return;
+  const style = document.createElement("style");
+  style.id = "login-overlay-style";
+  style.textContent = [
+    "#login-overlay{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(15,23,42,.45);backdrop-filter:blur(4px)}",
+    "#login-overlay[hidden]{display:none!important}",
+    ".login-card{width:100%;max-width:400px;background:#fff;border-radius:16px;box-shadow:0 20px 50px rgba(15,23,42,.18);padding:28px 24px 22px}",
+    ".login-card h2{margin:0 0 8px;font-size:1.25rem;color:#0f172a}",
+    ".login-card p{margin:0 0 18px;color:#64748b;font-size:.92rem;line-height:1.5}",
+    ".login-card label{display:block;font-size:.85rem;color:#334155;margin-bottom:6px}",
+    ".login-card input[type=password],.login-card input[type=text]{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;font-size:1rem;outline:none}",
+    ".login-card input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}",
+    ".login-actions{margin-top:16px;display:flex;gap:10px}",
+    ".login-actions button{flex:1;border:none;border-radius:10px;padding:10px 14px;font-size:.95rem;cursor:pointer;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-weight:600}",
+    ".login-actions button:disabled{opacity:.6;cursor:not-allowed}",
+    ".login-error{margin-top:12px;color:#dc2626;font-size:.88rem}",
+    ".header-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;margin-top:4px}",
+    ".btn-logout{border:1px solid #e2e8f0;background:#fff;color:#475569;border-radius:8px;padding:6px 10px;font-size:.85rem;cursor:pointer;white-space:nowrap}"
+  ].join("");
+  document.head.appendChild(style);
+}
+
+function ensureLoginOpenButton() {
+  let loginBtn = document.getElementById("btn-login-open");
+  if (loginBtn) return loginBtn;
+
+  const header = document.querySelector(".header-actions") || document.querySelector("header") || document.body;
+  loginBtn = document.createElement("button");
+  loginBtn.type = "button";
+  loginBtn.className = "btn-logout";
+  loginBtn.id = "btn-login-open";
+  loginBtn.textContent = "登录";
+  loginBtn.hidden = true;
+  header.appendChild(loginBtn);
+  loginBtn.addEventListener("click", function () {
+    requireLogin("请输入访问令牌");
+  });
+  return loginBtn;
+}
+
+function ensureLoginUI() {
+  injectLoginStyles();
+  ensureLoginOpenButton();
+
+  let overlay = document.getElementById("login-overlay");
+  if (overlay) {
+    // 旧 DOM 若缺表单，补齐最小结构
+    if (!document.getElementById("login-form")) {
+      overlay.replaceChildren();
+    } else {
+      bindLoginForm(document.getElementById("login-form"));
+      return overlay;
+    }
+  } else {
+    overlay = document.createElement("div");
+    overlay.id = "login-overlay";
+    document.body.appendChild(overlay);
+  }
+
+  // 旧页面/缓存未嵌入登录层时，动态创建，避免“永远没有弹窗”
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.hidden = true;
+
+  const card = document.createElement("div");
+  card.className = "login-card";
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-labelledby", "login-title");
+
+  const h2 = document.createElement("h2");
+  h2.id = "login-title";
+  h2.textContent = "访问验证";
+
+  const p = document.createElement("p");
+  p.textContent = "此实例已启用访问令牌。请输入管理员提供的令牌后继续浏览与下载。";
+
+  const form = document.createElement("form");
+  form.id = "login-form";
+
+  const label = document.createElement("label");
+  label.setAttribute("for", "login-token");
+  label.textContent = "访问令牌";
+
+  const input = document.createElement("input");
+  input.id = "login-token";
+  input.name = "access_token";
+  input.type = "password";
+  input.autocomplete = "current-password";
+  input.required = true;
+  input.placeholder = "粘贴 access_token";
+
+  const actions = document.createElement("div");
+  actions.className = "login-actions";
+  const btn = document.createElement("button");
+  btn.type = "submit";
+  btn.id = "btn-login";
+  btn.textContent = "进入网盘";
+  actions.appendChild(btn);
+
+  const err = document.createElement("div");
+  err.id = "login-error";
+  err.className = "login-error";
+  err.hidden = true;
+
+  form.appendChild(label);
+  form.appendChild(input);
+  form.appendChild(actions);
+  form.appendChild(err);
+  card.appendChild(h2);
+  card.appendChild(p);
+  card.appendChild(form);
+  overlay.appendChild(card);
+
+  bindLoginForm(form);
+  return overlay;
+}
+
 function showLogin(show) {
-  const overlay = document.getElementById("login-overlay");
-  if (!overlay) return;
-  overlay.hidden = !show;
-  overlay.setAttribute("aria-hidden", show ? "false" : "true");
+  const overlay = ensureLoginUI();
+  if (show) {
+    overlay.hidden = false;
+    overlay.removeAttribute("hidden");
+    overlay.style.display = "flex";
+    overlay.setAttribute("aria-hidden", "false");
+  } else {
+    overlay.hidden = true;
+    overlay.setAttribute("hidden", "");
+    overlay.style.display = "none";
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
   const app = document.getElementById("app-main");
   if (app) app.setAttribute("aria-hidden", show ? "true" : "false");
+
   if (show) {
     const input = document.getElementById("login-token");
     if (input) {
-      input.value = "";
+      // 不强制清空，方便输错后重试
       setTimeout(function () {
         input.focus();
+        input.select();
       }, 50);
     }
   }
@@ -125,27 +254,85 @@ function showLogin(show) {
 
 function updateAuthUI() {
   const logoutBtn = document.getElementById("btn-logout");
+  const loginBtn = document.getElementById("btn-login-open");
   if (logoutBtn) {
     logoutBtn.hidden = !(authRequired && authenticated);
+  }
+  if (loginBtn) {
+    // 需要鉴权且未登录时，始终提供手动入口
+    loginBtn.hidden = !(authRequired && !authenticated);
+  }
+}
+
+function requireLogin(message) {
+  authRequired = true;
+  authenticated = false;
+  updateAuthUI();
+  showLogin(true);
+
+  const statusEl = document.getElementById("status");
+  if (statusEl) {
+    statusEl.style.display = "block";
+    statusEl.replaceChildren();
+    const tip = document.createElement("div");
+    tip.className = "status-tip status-error";
+    tip.textContent = message || "请先登录";
+    statusEl.appendChild(tip);
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "btn-refresh";
+    openBtn.style.marginTop = "12px";
+    openBtn.textContent = "输入访问令牌";
+    openBtn.addEventListener("click", function () {
+      showLogin(true);
+      const input = document.getElementById("login-token");
+      if (input) input.focus();
+    });
+    statusEl.appendChild(openBtn);
+  }
+
+  const bannerEl = document.getElementById("list-banner");
+  if (bannerEl) {
+    bannerEl.hidden = false;
+    bannerEl.replaceChildren();
+    const box = document.createElement("div");
+    box.className = "banner-warning";
+    box.textContent = message || "需要登录后才能查看文件列表";
+    bannerEl.appendChild(box);
+  }
+
+  if (message) {
+    const errEl = document.getElementById("login-error");
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = message;
+    }
+    showToast("🔑 " + message);
   }
 }
 
 function checkAuth() {
   return apiFetch("/api/auth/status", { method: "GET" })
     .then(function (resp) {
-      return resp.json().then(function (data) {
-        return { resp: resp, data: data };
+      return resp.text().then(function (text) {
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          data = null;
+        }
+        return { resp: resp, data: data, text: text };
       });
     })
     .then(function (result) {
-      if (!result.resp.ok) {
-        throw new Error("无法获取鉴权状态");
+      if (!result.resp.ok || !result.data) {
+        throw new Error("无法获取鉴权状态（HTTP " + result.resp.status + "）");
       }
       authRequired = !!result.data.auth_required;
       authenticated = !!result.data.authenticated;
       updateAuthUI();
       if (authRequired && !authenticated) {
-        showLogin(true);
+        requireLogin("请输入访问令牌后继续");
         return false;
       }
       showLogin(false);
@@ -186,62 +373,58 @@ function doLogout() {
       authenticated = false;
       updateAuthUI();
       if (authRequired) {
-        showLogin(true);
+        requireLogin("已退出登录");
         const listEl = document.getElementById("file-list");
         if (listEl) listEl.replaceChildren();
-        showToast("已退出登录");
+        const statusEl = document.getElementById("status");
+        if (statusEl) {
+          statusEl.style.display = "block";
+          statusEl.replaceChildren();
+          const tip = document.createElement("div");
+          tip.className = "status-tip";
+          tip.textContent = "请先登录";
+          statusEl.appendChild(tip);
+        }
+      } else {
+        showLogin(false);
+        showToast("已退出");
       }
     });
 }
 
-// ===== 路径导航与面包屑 =====
-
-function renderBreadcrumbs() {
-  const container = document.getElementById("breadcrumbs");
-  container.replaceChildren();
-
-  const rootSpan = document.createElement("span");
-  if (currentDir === "/") {
-    rootSpan.className = "breadcrumb-current";
-    rootSpan.textContent = "根目录";
-    container.appendChild(rootSpan);
-  } else {
-    rootSpan.className = "breadcrumb-item";
-    rootSpan.textContent = "根目录";
-    rootSpan.addEventListener("click", function () {
-      enterDir("/");
-    });
-    container.appendChild(rootSpan);
-  }
-
-  if (currentDir === "/") return;
-
-  const parts = currentDir.split("/").filter(function (p) {
-    return p !== "";
-  });
-  let accPath = "";
-  parts.forEach(function (part, index) {
-    const sep = document.createElement("span");
-    sep.className = "breadcrumb-separator";
-    sep.textContent = " / ";
-    container.appendChild(sep);
-
-    accPath += "/" + part;
-    const isLast = index === parts.length - 1;
-    const span = document.createElement("span");
-    if (isLast) {
-      span.className = "breadcrumb-current";
-      span.textContent = part;
-      container.appendChild(span);
-    } else {
-      span.className = "breadcrumb-item";
-      span.textContent = part;
-      const targetPath = accPath;
-      span.addEventListener("click", function () {
-        enterDir(targetPath);
-      });
-      container.appendChild(span);
+function bindLoginForm(loginForm) {
+  if (!loginForm || loginForm.dataset.bound === "1") return;
+  loginForm.dataset.bound = "1";
+  loginForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    const input = document.getElementById("login-token");
+    const token = input ? input.value.trim() : "";
+    const errEl = document.getElementById("login-error");
+    if (errEl) {
+      errEl.hidden = true;
+      errEl.textContent = "";
     }
+    if (!token) {
+      if (errEl) {
+        errEl.hidden = false;
+        errEl.textContent = "请输入访问令牌";
+      }
+      return;
+    }
+    const btn = document.getElementById("btn-login");
+    if (btn) btn.disabled = true;
+    doLogin(token)
+      .catch(function (err) {
+        if (errEl) {
+          errEl.hidden = false;
+          errEl.textContent = err.message || "登录失败";
+        }
+        showToast("❌ " + (err.message || "登录失败"));
+        showLogin(true);
+      })
+      .finally(function () {
+        if (btn) btn.disabled = false;
+      });
   });
 }
 
@@ -288,9 +471,7 @@ function loadFiles(dir) {
     .then(function (resp) {
       return resp.text().then(function (text) {
         if (resp.status === 401) {
-          authenticated = false;
-          updateAuthUI();
-          showLogin(true);
+          requireLogin(parseAPIError(resp, text));
           throw new Error(parseAPIError(resp, text));
         }
         if (!resp.ok) {
@@ -544,9 +725,7 @@ function requestShortLink(filePath) {
     .then(function (resp) {
       return resp.text().then(function (text) {
         if (resp.status === 401) {
-          authenticated = false;
-          updateAuthUI();
-          showLogin(true);
+          requireLogin(parseAPIError(resp, text));
         }
         if (!resp.ok) {
           throw new Error(parseAPIError(resp, text));
@@ -641,39 +820,9 @@ function copyText(text) {
 
 // ===== 初始化 =====
 document.addEventListener("DOMContentLoaded", function () {
-  const loginForm = document.getElementById("login-form");
-  if (loginForm) {
-    loginForm.addEventListener("submit", function (e) {
-      e.preventDefault();
-      const input = document.getElementById("login-token");
-      const token = input ? input.value.trim() : "";
-      const errEl = document.getElementById("login-error");
-      if (errEl) {
-        errEl.hidden = true;
-        errEl.textContent = "";
-      }
-      if (!token) {
-        if (errEl) {
-          errEl.hidden = false;
-          errEl.textContent = "请输入访问令牌";
-        }
-        return;
-      }
-      const btn = document.getElementById("btn-login");
-      if (btn) btn.disabled = true;
-      doLogin(token)
-        .catch(function (err) {
-          if (errEl) {
-            errEl.hidden = false;
-            errEl.textContent = err.message || "登录失败";
-          }
-          showToast("❌ " + (err.message || "登录失败"));
-        })
-        .finally(function () {
-          if (btn) btn.disabled = false;
-        });
-    });
-  }
+  // 确保登录层与表单事件就绪（兼容旧 HTML 缓存）
+  ensureLoginUI();
+  bindLoginForm(document.getElementById("login-form"));
 
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {
@@ -682,17 +831,32 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  document.getElementById("btn-refresh").addEventListener("click", function () {
-    loadFiles(currentDir);
-  });
+  const loginOpenBtn = document.getElementById("btn-login-open");
+  if (loginOpenBtn) {
+    loginOpenBtn.addEventListener("click", function () {
+      requireLogin("请输入访问令牌");
+    });
+  }
+
+  const refreshBtn = document.getElementById("btn-refresh");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", function () {
+      if (authRequired && !authenticated) {
+        requireLogin("请先登录后再刷新列表");
+        return;
+      }
+      loadFiles(currentDir);
+    });
+  }
 
   checkAuth()
     .then(function (ok) {
       if (ok) return loadFiles(currentDir);
+      // 未登录：只弹窗，不偷偷拉列表
     })
     .catch(function (err) {
-      showToast("❌ " + (err.message || "初始化失败"));
-      // 若鉴权状态接口失败，仍尝试加载（兼容旧部署）
-      loadFiles(currentDir);
+      console.warn("[鉴权] 初始化失败", err);
+      // 鉴权状态接口异常时，宁可弹出登录，也不要无令牌硬拉列表导致 401 误导成 Cookie 错误
+      requireLogin((err && err.message) || "鉴权初始化失败，请尝试输入访问令牌");
     });
 });

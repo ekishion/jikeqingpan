@@ -189,5 +189,13 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// HTML/JS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧登录页
+	switch name {
+	case "index.html", "app.js":
+		w.Header().Set("Cache-Control", "no-store, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+	default:
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+	}
 	http.ServeFileFS(w, r, s.staticRoot, name)
 }
