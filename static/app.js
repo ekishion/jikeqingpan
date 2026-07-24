@@ -708,14 +708,23 @@ function buildFileItem(file) {
     dlBtn.setAttribute("type", "button");
     dlBtn.textContent = "下载 ⬇";
     dlBtn.setAttribute("aria-label", "下载 " + fileName);
-    dlBtn.addEventListener("click", function (e) {
+    const onDownload = function (e) {
+      e.preventDefault();
       e.stopPropagation();
       downloadFile(filePath, fileName);
+    };
+    dlBtn.addEventListener("click", onDownload);
+    // 防止连点按钮时：两次 click + 冒泡 dblclick 触发多次下载
+    dlBtn.addEventListener("dblclick", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
     });
     actionsEl.appendChild(dlBtn);
 
     item.appendChild(actionsEl);
-    item.addEventListener("dblclick", function () {
+    // 双击文件行下载；点到按钮时已 stopPropagation，不会重复
+    item.addEventListener("dblclick", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".file-action")) return;
       downloadFile(filePath, fileName);
     });
   }
@@ -725,12 +734,20 @@ function buildFileItem(file) {
 
 // ===== 文件下载 =====
 
+// 进行中的下载请求：同一 path 只允许一个 in-flight，避免连点打出多条直链
+const downloadInflight = Object.create(null);
+
 function triggerDownloadNavigation(downloadUrl) {
-  // 优先新标签，避免丢失当前目录浏览状态；被拦截时回退当前页跳转。
-  const win = window.open(downloadUrl, "_blank", "noopener,noreferrer");
-  if (!win) {
-    window.location.assign(downloadUrl);
-  }
+  // 注意：不要用 window.open(..., "noopener") 后再 if (!win) location.assign。
+  // 现代浏览器在 noopener 时会返回 null，即使新标签已打开，从而误触发第二次导航。
+  const a = document.createElement("a");
+  a.href = downloadUrl;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function downloadFile(filePath, fileName) {
@@ -739,6 +756,12 @@ function downloadFile(filePath, fileName) {
     return;
   }
 
+  if (downloadInflight[filePath]) {
+    showToast("⏳ 已在准备下载，请稍候…");
+    return;
+  }
+
+  downloadInflight[filePath] = true;
   showToast("⏳ 正在生成安全直链…");
 
   requestShortLink(filePath)
@@ -749,6 +772,11 @@ function downloadFile(filePath, fileName) {
     .catch(function (err) {
       showToast("❌ 下载失败：" + err.message);
       console.warn("[网盘] 直链解析失败: " + err.message);
+    })
+    .finally(function () {
+      setTimeout(function () {
+        delete downloadInflight[filePath];
+      }, 1500);
     });
 }
 
