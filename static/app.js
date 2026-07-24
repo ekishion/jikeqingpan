@@ -428,6 +428,56 @@ function bindLoginForm(loginForm) {
   });
 }
 
+function renderBreadcrumbs() {
+  const container = document.getElementById("breadcrumbs");
+  if (!container) return;
+  container.replaceChildren();
+
+  const rootSpan = document.createElement("span");
+  if (currentDir === "/") {
+    rootSpan.className = "breadcrumb-current";
+    rootSpan.textContent = "根目录";
+    container.appendChild(rootSpan);
+  } else {
+    rootSpan.className = "breadcrumb-item";
+    rootSpan.textContent = "根目录";
+    rootSpan.addEventListener("click", function () {
+      enterDir("/");
+    });
+    container.appendChild(rootSpan);
+  }
+
+  if (currentDir === "/") return;
+
+  const parts = currentDir.split("/").filter(function (p) {
+    return p !== "";
+  });
+  let accPath = "";
+  parts.forEach(function (part, index) {
+    const sep = document.createElement("span");
+    sep.className = "breadcrumb-separator";
+    sep.textContent = " / ";
+    container.appendChild(sep);
+
+    accPath += "/" + part;
+    const isLast = index === parts.length - 1;
+    const span = document.createElement("span");
+    if (isLast) {
+      span.className = "breadcrumb-current";
+      span.textContent = part;
+      container.appendChild(span);
+    } else {
+      span.className = "breadcrumb-item";
+      span.textContent = part;
+      const targetPath = accPath;
+      span.addEventListener("click", function () {
+        enterDir(targetPath);
+      });
+      container.appendChild(span);
+    }
+  });
+}
+
 function enterDir(dir) {
   setCurrentDir(dir);
   loadFiles(dir);
