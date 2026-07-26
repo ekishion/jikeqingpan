@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -34,21 +36,40 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "auth_required": false})
 		return
 	}
+	// 登录失败指数退避：锁定期内直接拒绝，不比对令牌。
+	ip := clientIP(r.RemoteAddr)
+	now := time.Now()
+	if ok, retryAfter := s.loginGuard.allow(ip, now); !ok {
+		secs := int(retryAfter.Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeJSONError(w, http.StatusTooManyRequests, "login_locked", "验证过于频繁，请稍后再试")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
 	var request struct {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求体格式错误")
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
 		return
 	}
 	token := strings.TrimSpace(request.Token)
 	if subtleCompareToken(token, s.cfg.AccessToken) {
-		s.setAccessCookie(w, r, s.cfg.AccessToken)
+		s.loginGuard.recordSuccess(ip)
+		if err := s.issueSession(w, r); err != nil {
+			log.Printf("[ERROR] 签发会话令牌失败: %v", err)
+			writeJSONError(w, http.StatusInternalServerError, "session_issue_failed", "验证失败，请稍后重试")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	writeJSONError(w, http.StatusUnauthorized, "invalid_token", "访问令牌错误")
+	s.loginGuard.recordFailure(ip, now)
+	writeJSONError(w, http.StatusUnauthorized, "invalid_token", "访问令牌不正确，请检查后重试")
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +86,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 			Dir string `json:"dir"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "bad_request", "请求体格式错误")
+			writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
 			return
 		}
 		dir = request.Dir
@@ -77,14 +98,14 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isValidBaiduPath(dir) {
 		log.Printf("[WARN] 获取文件列表的非法路径被拒绝: %q", dir)
-		writeJSONError(w, http.StatusBadRequest, "invalid_path", "非法路径")
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
 		return
 	}
 
 	result, err := s.fetchFileList(dir)
 	if err != nil {
 		log.Printf("[ERROR] 获取文件列表失败: %v", err)
-		writeJSONError(w, http.StatusBadGateway, "baidu_list_failed", "获取文件列表失败，请检查 Cookie 是否有效")
+		writeJSONError(w, http.StatusBadGateway, "baidu_list_failed", "无法获取文件列表，请稍后重试")
 		return
 	}
 
@@ -93,7 +114,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	publicBody, err := stripDownloadLinks(result.Body)
 	if err != nil {
 		log.Printf("[ERROR] 清理文件列表直链失败: %v", err)
-		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "处理文件列表失败")
+		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败，请稍后重试")
 		return
 	}
 
@@ -108,36 +129,36 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求体格式错误")
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
 		return
 	}
 	filePath := request.Path
 	if filePath == "" {
-		writeJSONError(w, http.StatusBadRequest, "missing_path", "缺少 path 参数")
+		writeJSONError(w, http.StatusBadRequest, "missing_path", "请选择要下载的文件")
 		return
 	}
 	if !isValidBaiduPath(filePath) {
 		log.Printf("[WARN] 非法路径请求被拒绝: %q", filePath)
-		writeJSONError(w, http.StatusBadRequest, "invalid_path", "非法路径")
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
 		return
 	}
 
 	// 创建短链前确认文件存在且非目录
 	if _, err := s.ensureFileMeta(filePath); err != nil {
 		log.Printf("[WARN] 创建短链前校验失败: %v", err)
-		writeJSONError(w, http.StatusNotFound, "file_not_found", "文件不存在或不可下载")
+		writeJSONError(w, http.StatusNotFound, "file_not_found", "文件不存在或已被移动")
 		return
 	}
 
 	token, err := s.shortLinks.create(filePath)
 	if err != nil {
 		log.Printf("[ERROR] 创建短链接失败: %v", err)
-		writeJSONError(w, http.StatusInternalServerError, "shortlink_failed", "创建短链接失败")
+		writeJSONError(w, http.StatusInternalServerError, "shortlink_failed", "生成下载链接失败，请重试")
 		return
 	}
 	respJSON, err := downloadJSONResponse("/d/" + token)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "response_failed", "生成直链响应失败")
+		writeJSONError(w, http.StatusInternalServerError, "response_failed", "生成下载链接失败，请重试")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -149,7 +170,7 @@ func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 	token = strings.Trim(token, "/")
 	filePath, ok := s.shortLinks.resolve(token, true)
 	if !ok {
-		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "短链不存在或已过期")
+		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
 		return
 	}
 	s.redirectToBaiduDownload(w, r, filePath)
@@ -159,12 +180,12 @@ func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request,
 	dlink, err := s.getBaiduDLink(filePath, r.Header.Get("User-Agent"))
 	if err != nil {
 		log.Printf("[ERROR] 获取百度直链失败: %v", err)
-		writeJSONError(w, http.StatusBadGateway, "dlink_failed", "获取直链失败，请稍后重试或检查 Cookie")
+		writeJSONError(w, http.StatusBadGateway, "dlink_failed", "下载失败，请稍后重试")
 		return
 	}
 	if !isAllowedBaiduDownloadURL(dlink) {
 		log.Printf("[ERROR] 拒绝非白名单下载地址: %q", dlink)
-		writeJSONError(w, http.StatusBadGateway, "dlink_rejected", "获取直链失败")
+		writeJSONError(w, http.StatusBadGateway, "dlink_rejected", "下载失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, dlink, http.StatusFound)

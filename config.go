@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,6 +22,14 @@ type Config struct {
 	// AccessToken 非空时启用全站访问控制（API 与下载短链均需鉴权）。
 	// 适合 VPS 给少数用户使用：共享一个长随机令牌即可。
 	AccessToken string `json:"access_token"`
+
+	// SessionSecret 用于给登录会话签名的密钥。为空时由 AccessToken 派生，
+	// 因此零配置即可用；显式修改该值可一键吊销所有已登录会话。
+	SessionSecret string `json:"session_secret"`
+
+	// AuthSessionTTLSeconds 登录会话有效期，默认 7 天。会话令牌内嵌过期时间，
+	// 客户端无法延长；配合 SessionSecret 轮换实现服务端强制下线。
+	AuthSessionTTLSeconds int `json:"auth_session_ttl_seconds"`
 
 	// ForceSecureCookie 在 TLS 终结于反向代理时强制 Secure Cookie。
 	ForceSecureCookie bool `json:"force_secure_cookie"`
@@ -45,6 +55,26 @@ func (c *Config) sessionTTL() time.Duration {
 		return time.Hour
 	}
 	return time.Duration(c.SessionTTLSeconds) * time.Second
+}
+
+// authSessionTTL 登录会话有效期，默认 7 天。
+func (c *Config) authSessionTTL() time.Duration {
+	if c.AuthSessionTTLSeconds <= 0 {
+		return 7 * 24 * time.Hour
+	}
+	return time.Duration(c.AuthSessionTTLSeconds) * time.Second
+}
+
+// sessionSigningKey 派生会话签名密钥：优先用显式 SessionSecret，
+// 否则由 AccessToken 派生（轮换 AccessToken 会自动失效旧会话）。
+func (c *Config) sessionSigningKey() []byte {
+	base := strings.TrimSpace(c.SessionSecret)
+	if base == "" {
+		base = c.AccessToken
+	}
+	mac := hmac.New(sha256.New, []byte(base))
+	mac.Write([]byte("jikeqingpan/session/v1"))
+	return mac.Sum(nil)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -81,6 +111,12 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("ACCESS_TOKEN")); v != "" {
 		c.AccessToken = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SESSION_SECRET")); v != "" {
+		c.SessionSecret = v
+	}
+	if n, ok := envInt("AUTH_SESSION_TTL_SECONDS"); ok {
+		c.AuthSessionTTLSeconds = n
 	}
 	if v := strings.TrimSpace(os.Getenv("BAIDU_APP_ID")); v != "" {
 		c.BaiduAppID = v
@@ -149,7 +185,11 @@ func (c *Config) normalizeAndValidate() error {
 	if c.SessionTTLSeconds < 0 {
 		return fmt.Errorf("session_ttl_seconds 不能为负数")
 	}
+	if c.AuthSessionTTLSeconds < 0 {
+		return fmt.Errorf("auth_session_ttl_seconds 不能为负数")
+	}
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
+	c.SessionSecret = strings.TrimSpace(c.SessionSecret)
 	return nil
 }
 

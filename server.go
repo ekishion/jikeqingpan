@@ -17,6 +17,8 @@ type Server struct {
 	shortLinks   *shortLinkStore
 	cache        *fileListCache
 	staticRoot   fs.FS
+	sessions     *sessionManager
+	loginGuard   *loginGuard
 	uk           int64
 	sk           string
 	sessionAt    time.Time
@@ -38,6 +40,8 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		shortLinks:   newShortLinkStore(cfg.shortLinkTTL(), cfg.ShortLinkMaxUses),
 		cache:        newFileListCache(),
 		staticRoot:   sub,
+		sessions:     newSessionManager(cfg.sessionSigningKey(), cfg.authSessionTTL()),
+		loginGuard:   newLoginGuard(),
 	}
 	s.routes()
 	return s
@@ -116,11 +120,11 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 				}
 			}
 			if !ok {
-				writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "方法不允许")
+				writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "请求方式不受支持")
 				return
 			}
 		} else if r.Method != http.MethodGet && r.Method != http.MethodPost {
-			writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "方法不允许")
+			writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "请求方式不受支持")
 			return
 		}
 
@@ -138,7 +142,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 			if _, err := r.Cookie(csrfTokenCookieName); err != nil {
 				token, tokenErr := newCSRFToken()
 				if tokenErr != nil {
-					writeJSONError(w, http.StatusInternalServerError, "csrf_issue", "生成安全令牌失败")
+					writeJSONError(w, http.StatusInternalServerError, "csrf_issue", "服务异常，请刷新页面重试")
 					return
 				}
 				s.setCSRFCookie(w, r, token)
@@ -148,7 +152,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 		// CSRF 校验：仅保护 POST 且 opts.csrf
 		if opts.csrf && r.Method == http.MethodPost {
 			if !hasValidCSRFToken(r) {
-				writeJSONError(w, http.StatusForbidden, "csrf_invalid", "CSRF 令牌无效")
+				writeJSONError(w, http.StatusForbidden, "csrf_invalid", "页面已过期，请刷新后重试")
 				return
 			}
 			if cookie, err := r.Cookie(csrfTokenCookieName); err == nil && cookie.Value != "" {
@@ -158,7 +162,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 
 		// 访问鉴权
 		if opts.requireAuth && s.cfg.authEnabled() && !s.hasValidAccess(r) {
-			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "需要访问令牌")
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "请先验证访问权限")
 			return
 		}
 
@@ -166,7 +170,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 		if opts.rateLimit {
 			ip := clientIP(r.RemoteAddr)
 			if !s.limiter.Allow(ip) {
-				writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后重试")
+				writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "操作太频繁了，请稍后再试")
 				return
 			}
 		}
@@ -189,9 +193,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// HTML/JS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧登录页
+	// HTML/JS/CSS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧界面
 	switch name {
-	case "index.html", "app.js":
+	case "index.html", "app.js", "app.css":
 		w.Header().Set("Cache-Control", "no-store, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 	default:

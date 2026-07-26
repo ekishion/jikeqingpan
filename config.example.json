@@ -3,6 +3,8 @@
   "bind_address": "127.0.0.1",
   "baidu_cookie": "在这里粘贴百度网盘青春版 Cookie",
   "access_token": "请用 openssl rand -hex 24 生成的长随机串",
+  "session_secret": "",
+  "auth_session_ttl_seconds": 604800,
   "force_secure_cookie": false,
   "rate_limit_per_second": 10,
   "baidu_app_id": "250528",

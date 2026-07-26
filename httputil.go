@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -9,14 +10,17 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
-	csrfTokenCookieName   = "csrf_token"
-	accessTokenCookieName = "access_token"
-	csrfTokenMaxAge       = 3600
-	accessTokenMaxAge     = 7 * 24 * 3600 // 7 天，适合少数人反复访问
-	defaultBaiduUA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+	csrfTokenCookieName = "csrf_token"
+	// sessionCookieName 存放签名会话令牌（非 access_token 原文）。
+	sessionCookieName = "jkqp_session"
+	// legacyAccessCookieName 旧版本把 access_token 原文写入的 Cookie，仅用于登出时清理。
+	legacyAccessCookieName = "access_token"
+	csrfTokenMaxAge        = 3600
+	defaultBaiduUA         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 )
 
 func clientIP(remoteAddr string) string {
@@ -87,8 +91,9 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// extractAccessToken 从 Header / Cookie 提取访问令牌（不接受 query，避免进日志）。
-func extractAccessToken(r *http.Request) string {
+// headerAccessToken 从请求头提取原始访问令牌（编程式客户端用；不接受 query 与
+// Cookie，避免令牌进日志、也不把 Cookie 当原始令牌）。浏览器会话走签名 Cookie。
+func headerAccessToken(r *http.Request) string {
 	if h := strings.TrimSpace(r.Header.Get("X-Access-Token")); h != "" {
 		return h
 	}
@@ -98,46 +103,63 @@ func extractAccessToken(r *http.Request) string {
 			return strings.TrimSpace(auth[len(prefix):])
 		}
 	}
-	if c, err := r.Cookie(accessTokenCookieName); err == nil {
-		return strings.TrimSpace(c.Value)
-	}
 	return ""
 }
 
+// subtleCompareToken 对两侧做 SHA-256 摘要后再常量时间比较，摘要长度恒定，
+// 因此不泄露令牌长度这一侧信道。
 func subtleCompareToken(got, want string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	g := sha256.Sum256([]byte(got))
+	w := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(g[:], w[:]) == 1
 }
 
 func (s *Server) hasValidAccess(r *http.Request) bool {
 	if s.cfg == nil || !s.cfg.authEnabled() {
 		return true
 	}
-	return subtleCompareToken(extractAccessToken(r), s.cfg.AccessToken)
+	// 1) 编程式客户端：请求头携带原始令牌。
+	if tok := headerAccessToken(r); tok != "" && subtleCompareToken(tok, s.cfg.AccessToken) {
+		return true
+	}
+	// 2) 浏览器会话：签名会话 Cookie。
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		if s.sessions != nil && s.sessions.validate(c.Value, time.Now()) {
+			return true
+		}
+	}
+	return false
 }
 
-func (s *Server) setAccessCookie(w http.ResponseWriter, r *http.Request, token string) {
+// issueSession 登录成功后签发会话令牌并写入 HttpOnly Cookie。
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) error {
+	token, err := s.sessions.issue(time.Now())
+	if err != nil {
+		return err
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     accessTokenCookieName,
+		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   accessTokenMaxAge,
+		MaxAge:   int(s.cfg.authSessionTTL().Seconds()),
 		SameSite: http.SameSiteLaxMode,
 		Secure:   s.cookieSecure(r),
 		HttpOnly: true,
 	})
+	return nil
 }
 
 func (s *Server) clearAccessCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     accessTokenCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cookieSecure(r),
-		HttpOnly: true,
-	})
+	secure := s.cookieSecure(r)
+	for _, name := range []string{sessionCookieName, legacyAccessCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   secure,
+			HttpOnly: true,
+		})
+	}
 }
