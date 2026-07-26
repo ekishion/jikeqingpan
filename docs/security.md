@@ -10,7 +10,12 @@
 
 ## 应用层能力
 
-- 登录态：HttpOnly Cookie + 可选 Bearer / `X-Access-Token`
+- 登录态：**HMAC 签名会话令牌**写入 HttpOnly Cookie（`jkqp_session`）；Cookie 不含 `access_token` 原文，泄露也拿不到管理员令牌
+  - 会话内嵌过期时间并参与签名，客户端无法篡改延长；默认 7 天（`auth_session_ttl_seconds`）
+  - 轮换 `session_secret`（或修改 `access_token`）即服务端强制下线全部会话
+  - 编程式客户端仍可用 `Authorization: Bearer` / `X-Access-Token` 请求头携带原始令牌
+- 登录防爆破：`/api/login` 按 IP 指数退避锁定（前 5 次容错，之后失败翻倍锁定，封顶 5 分钟，锁定期返回 `429` + `Retry-After`）
+- 令牌比较：对 SHA-256 摘要做常量时间比较，不泄露令牌长度侧信道
 - CSRF：双提交 Cookie，保护 POST
 - 下载短链：32 位随机 hex，可配 TTL / 次数上限
 - 路径校验：拒绝 `..`、异常字符、规范化后语义变化的路径

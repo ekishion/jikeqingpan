@@ -30,6 +30,8 @@ openssl rand -hex 24
 | `bind_address` | `BIND_ADDRESS` | `127.0.0.1` | 绑定地址；容器内请用 `0.0.0.0` |
 | `baidu_cookie` | `BAIDU_COOKIE` | （必填） | 百度 Cookie（敏感） |
 | `access_token` | `ACCESS_TOKEN` | 空 | 访问令牌；非空启用鉴权（敏感） |
+| `session_secret` | `SESSION_SECRET` | 空 | 会话签名密钥；留空则由 `access_token` 派生。改此值可一键强制所有人重新登录（敏感） |
+| `auth_session_ttl_seconds` | `AUTH_SESSION_TTL_SECONDS` | `604800` | 登录会话有效期（秒），默认 7 天 |
 | `force_secure_cookie` | `FORCE_SECURE_COOKIE` | `false` | 强制 Cookie `Secure`（HTTPS 反代时建议 true） |
 | `rate_limit_per_second` | `RATE_LIMIT_PER_SECOND` | `10` | 每 IP 每秒限流 |
 | `baidu_app_id` | `BAIDU_APP_ID` | `250528` | 百度 App ID |

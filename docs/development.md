@@ -13,9 +13,15 @@
 ├── shortlink.go         # 下载短链存储
 ├── pathsec.go           # 路径与下载域名校验
 ├── ratelimit.go         # 按 IP 限流
-├── httputil.go          # Cookie / CSRF / 鉴权辅助
+├── httputil.go          # Cookie / CSRF / 访问校验辅助
+├── session.go           # HMAC 签名登录会话（签发与校验）
+├── loginguard.go        # 登录失败按 IP 指数退避锁定
 ├── security_test.go     # 安全相关单测
+├── auth_test.go         # 登录 / 会话 / 防爆破单测
 ├── static/              # 前端（go:embed）
+│   ├── index.html       # 页面结构
+│   ├── app.css          # 样式（纯白极简 · 深色跟随系统）
+│   └── app.js           # 逻辑 + 内联 Lucide 图标
 ├── docs/                # 文档
 ├── config.example.json  # 配置模板 → 复制为 config.json
 ├── Dockerfile

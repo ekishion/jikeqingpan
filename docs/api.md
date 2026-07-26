@@ -4,11 +4,10 @@
 
 鉴权方式（任选其一）：
 
-- 登录后的 HttpOnly Cookie `access_token`
-- 请求头 `Authorization: Bearer <token>`
-- 请求头 `X-Access-Token: <token>`
+- 浏览器：登录后的 HttpOnly 会话 Cookie `jkqp_session`（HMAC 签名、内嵌过期，非 token 原文）
+- 编程式客户端：请求头 `Authorization: Bearer <token>` 或 `X-Access-Token: <token>`
 
-> 不接受 query 传 token，避免进访问日志。
+> 不接受 query 传 token，避免进访问日志。Cookie 中也不再存放 token 原文。
 
 状态变更类 `POST` 需要 CSRF：
 
@@ -41,6 +40,9 @@ X-CSRF-Token: <csrf_token>
 
 {"token":"<access_token>"}
 ```
+
+成功返回 `{"ok":true}` 并下发签名会话 Cookie `jkqp_session`。
+令牌错误返回 `401 invalid_token`；同一 IP 连续失败会触发指数退避锁定，返回 `429 login_locked` 并带 `Retry-After`（秒）。
 
 ### 退出
 
