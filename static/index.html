@@ -61,10 +61,16 @@
 
     <div class="toolbar">
       <span class="file-count" id="file-count">正在加载列表…</span>
-      <button class="btn btn-refresh" id="btn-refresh" type="button">
-        <span class="btn-icon" data-icon="refresh-cw" aria-hidden="true"></span>
-        <span class="btn-label">刷新</span>
-      </button>
+      <div class="toolbar-actions">
+        <label class="search-box" for="file-search">
+          <span data-icon="search" aria-hidden="true"></span>
+          <input id="file-search" type="search" autocomplete="off" placeholder="筛选当前目录" aria-label="筛选当前目录文件">
+        </label>
+        <button class="btn btn-refresh" id="btn-refresh" type="button">
+          <span class="btn-icon" data-icon="refresh-cw" aria-hidden="true"></span>
+          <span class="btn-label">刷新</span>
+        </button>
+      </div>
     </div>
 
     <div id="list-banner" hidden></div>
@@ -85,6 +91,7 @@
     </footer>
   </div>
 
+  <script src="/icons.js"></script>
   <script src="/app.js"></script>
 </body>
 

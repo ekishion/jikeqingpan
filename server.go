@@ -203,6 +203,8 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		name = "index.html"
 	case "/app.js":
 		name = "app.js"
+	case "/icons.js":
+		name = "icons.js"
 	case "/app.css":
 		name = "app.css"
 	default:
@@ -211,7 +213,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// HTML/JS/CSS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧界面
 	switch name {
-	case "index.html", "app.js", "app.css":
+	case "index.html", "app.js", "icons.js", "app.css":
 		w.Header().Set("Cache-Control", "no-store, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 	default:
