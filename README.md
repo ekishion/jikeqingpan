@@ -12,6 +12,7 @@
 - 浏览网盘目录（支持文件夹、自动翻页合并）
 - 申请不透明短链后下载（路径不出现在下载 URL）
 - 复制短链分享（有效期内可重复访问；若开启访问控制，接收方也需先验证）
+- 图片文件站内灯箱预览（支持常见图片格式，单张最大 16 MB）
 - 登录会话用 HMAC 签名并内嵌过期时间，Cookie 不含令牌原文；可一键强制全员下线
 - 登录失败按 IP 指数退避锁定，抵御令牌爆破
 - 服务端限流、CSRF 保护、直链域名白名单
@@ -20,7 +21,7 @@
 
 ## 截图
 
-![即刻轻盘界面截图](https://img11.360buyimg.com/ddimg/jfs/t1/443186/21/10502/30047/6a1fa645F590f15a3/001536a2fd6f69b0.jpg)
+![即刻轻盘界面截图](./docs/images/index.png)
 
 ## 快速开始
 
@@ -89,5 +90,4 @@ curl -sS http://127.0.0.1:4172/healthz
 
 ## 相关链接
 
-- 开源仓库：<https://github.com/malaohu/jikeqingpan>
-- 作者博客：<https://51.ruyo.net>
+- 开源仓库：<https://github.com/ekishion/jikeqingpan>

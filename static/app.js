@@ -97,6 +97,11 @@ function fileIconMeta(name, isDir) {
   return { icon: "file", cat: "default" };
 }
 
+function isPreviewableImage(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  return ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "heic"].indexOf(ext) !== -1;
+}
+
 const TOAST_ICONS = {
   success: "circle-check",
   error: "circle-alert",
@@ -896,6 +901,22 @@ function buildFileItem(file) {
     const actionsEl = document.createElement("div");
     actionsEl.className = "file-actions";
 
+    if (isPreviewableImage(fileName)) {
+      const previewBtn = document.createElement("button");
+      previewBtn.className = "file-action";
+      previewBtn.setAttribute("type", "button");
+      previewBtn.appendChild(makeIcon("eye"));
+      const previewLabel = document.createElement("span");
+      previewLabel.textContent = "预览";
+      previewBtn.appendChild(previewLabel);
+      previewBtn.setAttribute("aria-label", "预览 " + fileName);
+      previewBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        previewImage(filePath, fileName);
+      });
+      actionsEl.appendChild(previewBtn);
+    }
+
     const copyBtn = document.createElement("button");
     copyBtn.className = "file-action";
     copyBtn.setAttribute("type", "button");
@@ -940,6 +961,56 @@ function buildFileItem(file) {
   }
 
   return item;
+}
+
+function previewImage(filePath, fileName) {
+  if (!filePath) {
+    showToast("文件路径无效，请刷新后重试", "warning");
+    return;
+  }
+  apiFetch("/api/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: filePath })
+  })
+    .then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (text) { throw new Error(parseAPIError(resp, text)); });
+      }
+      return resp.blob();
+    })
+    .then(function (blob) {
+      const url = URL.createObjectURL(blob);
+      const image = document.getElementById("lightbox-image");
+      const caption = document.getElementById("lightbox-caption");
+      if (!image) return;
+      image.onload = function () { URL.revokeObjectURL(url); };
+      image.src = url;
+      image.alt = fileName;
+      if (caption) caption.textContent = fileName;
+      openLightbox();
+    })
+    .catch(function (err) {
+      showToast("预览失败：" + err.message, "error");
+    });
+}
+
+function openLightbox() {
+  const lightbox = document.getElementById("image-lightbox");
+  if (!lightbox) return;
+  lightbox.hidden = false;
+  lightbox.setAttribute("aria-hidden", "false");
+  document.body.classList.add("lightbox-open");
+}
+
+function closeLightbox() {
+  const lightbox = document.getElementById("image-lightbox");
+  const image = document.getElementById("lightbox-image");
+  if (!lightbox) return;
+  lightbox.hidden = true;
+  lightbox.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("lightbox-open");
+  if (image) image.removeAttribute("src");
 }
 
 // ===== 文件下载 =====
@@ -1110,6 +1181,18 @@ function copyText(text) {
 document.addEventListener("DOMContentLoaded", function () {
   // 填充静态标记中的 Lucide 图标占位符（header/按钮/登录卡/页脚/加载器）
   mountIcons(document);
+
+  const lightbox = document.getElementById("image-lightbox");
+  const lightboxClose = document.getElementById("lightbox-close");
+  if (lightboxClose) lightboxClose.addEventListener("click", closeLightbox);
+  if (lightbox) {
+    lightbox.addEventListener("click", function (event) {
+      if (event.target === lightbox) closeLightbox();
+    });
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeLightbox();
+  });
 
   // 确保登录层与表单事件就绪（兼容旧 HTML 缓存）
   ensureLoginUI();

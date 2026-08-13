@@ -39,7 +39,7 @@ openssl rand -hex 24
 | `short_link_max_uses` | `SHORT_LINK_MAX_USES` | `0` | 短链最大使用次数；`0` 不限制 |
 | `session_ttl_seconds` | `SESSION_TTL_SECONDS` | `3600` | 百度 uk/sk 缓存（秒） |
 | `trusted_proxy_ips` | `TRUSTED_PROXY_IPS` | 空 | 允许读取 `X-Forwarded-For` 的反代 IP 或 CIDR；仅填写实际反代来源 |
-| `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化 |
+| `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化，父目录不存在时会自动创建 |
 | `allowed_paths` | `ALLOWED_PATHS` | 空 | 共享目录白名单；配置后仅允许这些目录及其子目录访问，多个环境变量路径用英文逗号分隔 |
 | — | `CONFIG_PATH` | `config.json` / 容器内 `/data/config.json` | 配置文件路径 |
 | — | `TZ` | — | 时区（Docker 默认 `Asia/Shanghai`） |

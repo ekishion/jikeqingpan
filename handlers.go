@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -216,6 +219,59 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(respJSON)
 }
 
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var request struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
+		return
+	}
+	if !isValidBaiduPath(request.Path) || !s.pathAllowed(request.Path) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
+		return
+	}
+	meta, err := s.ensureFileMeta(request.Path)
+	if err != nil || meta.IsDir == 1 {
+		writeJSONError(w, http.StatusNotFound, "file_not_found", "图片不存在或已被移动")
+		return
+	}
+	dlink, err := s.getBaiduDLink(request.Path, r.Header.Get("User-Agent"))
+	if err != nil || !isAllowedBaiduDownloadURL(dlink) {
+		writeJSONError(w, http.StatusBadGateway, "preview_link_failed", "无法准备图片预览")
+		return
+	}
+	upstream, err := s.httpClient.Get(dlink)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "preview_fetch_failed", "无法读取图片预览")
+		return
+	}
+	defer upstream.Body.Close()
+	if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+		writeJSONError(w, http.StatusBadGateway, "preview_fetch_failed", "图片预览暂时不可用")
+		return
+	}
+	const maxPreviewBytes = 16 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxPreviewBytes+1))
+	if err != nil || len(body) > maxPreviewBytes {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "preview_too_large", "图片超过 16 MB，无法在线预览")
+		return
+	}
+	contentType := http.DetectContentType(body)
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(request.Path)))
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "preview_not_image", "该文件不是可预览的图片")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_, _ = w.Write(body)
+}
+
 func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, "/d/")
 	token = strings.Trim(token, "/")
@@ -243,6 +299,12 @@ func (s *Server) audit(r *http.Request, event, filePath string) {
 	}
 	s.auditMu.Lock()
 	defer s.auditMu.Unlock()
+	if dir := filepath.Dir(s.cfg.AuditLogPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Printf("[audit] create directory failed: %v", err)
+			return
+		}
+	}
 	f, err := os.OpenFile(s.cfg.AuditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		log.Printf("[audit] open failed: %v", err)

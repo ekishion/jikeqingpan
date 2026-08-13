@@ -118,6 +118,59 @@ body {
   line-height: 1.5;
 }
 
+body.lightbox-open { overflow: hidden; }
+
+#image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: grid;
+  place-items: center;
+  padding: 64px 20px 64px;
+  background: rgba(0, 0, 0, 0.92);
+  overscroll-behavior: contain;
+}
+#image-lightbox[hidden] { display: none !important; }
+#lightbox-image {
+  display: block;
+  max-width: min(94vw, 1280px);
+  max-height: calc(100svh - 128px);
+  object-fit: contain;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.46);
+}
+.lightbox-close {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.lightbox-close:hover { background: rgba(255, 255, 255, 0.18); }
+.lightbox-close:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28); }
+.lightbox-close .icon { width: 20px; height: 20px; }
+#lightbox-caption {
+  position: absolute;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  max-width: calc(100vw - 40px);
+  overflow: hidden;
+  padding: 8px 12px;
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(20, 20, 22, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ===== 布局容器 ===== */
 .container {
   max-width: 840px;
@@ -813,6 +866,13 @@ body {
     margin-top: 4px;
   }
   .file-action { flex: 1; justify-content: center; }
+  .file-action { min-width: 0; padding: 7px 8px; gap: 4px; }
+  .file-action .icon { flex: 0 0 15px; }
+  .file-action span { white-space: nowrap; }
+
+  #image-lightbox { padding: 56px 10px 60px; }
+  #lightbox-image { max-width: 96vw; max-height: calc(100svh - 132px); }
+  .lightbox-close { width: 46px; height: 46px; }
 
   .footer { flex-wrap: wrap; gap: 12px 22px; }
 }

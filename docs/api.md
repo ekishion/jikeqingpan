@@ -100,6 +100,23 @@ GET /d/{token}
 - 可配置 TTL 与最大使用次数
 - 启用鉴权时，访问短链同样需要已登录
 
+### 图片预览
+
+图片文件由前端点击“预览”后请求，服务端读取图片并以 `inline` 响应，供站内灯箱显示：
+
+```http
+POST /api/preview
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{"path": "/图片目录/example.jpg"}
+```
+
+- 仅允许图片 MIME 类型；服务端同时结合文件内容和扩展名识别类型
+- 单张图片最大 16 MB
+- 预览内容会经过 VPS，因此会产生 VPS 出站流量；普通下载仍使用百度直链重定向
+- 常见错误：`preview_link_failed`、`preview_fetch_failed`、`preview_not_image`、`preview_too_large`
+
 ## 健康检查
 
 | 路径 | 鉴权 | 说明 |
@@ -118,4 +135,4 @@ GET /d/{token}
 }
 ```
 
-常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found` 等。
+常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`preview_not_image`、`preview_too_large` 等。

@@ -93,6 +93,9 @@ func (s *Server) routes() {
 		rateLimit:   true,
 		methods:     []string{http.MethodPost},
 	}))
+	s.mux.HandleFunc("/api/preview", s.withSecurity(s.handlePreview, securityOpts{
+		requireAuth: true, csrf: true, rateLimit: true, methods: []string{http.MethodPost},
+	}))
 	s.mux.HandleFunc("/healthz", s.withSecurity(s.handleHealthz, securityOpts{
 		requireAuth: false,
 		csrf:        false,
@@ -148,7 +151,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'")
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cache-Control", "no-store")

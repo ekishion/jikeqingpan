@@ -21,6 +21,7 @@
 - 路径校验：拒绝 `..`、异常字符、规范化后语义变化的路径
 - 直链域名白名单：仅允许百度相关 HTTPS 域名
 - dlink 缓存绑定 User-Agent，降低跨浏览器复用风险
+- 图片预览单独走受限接口，仅允许图片 MIME 类型且限制为 16 MB；预览数据经过 VPS 并以 `inline` 返回
 - 按 IP 限流；不信任未配置的 `X-Forwarded-For`
 - 元数据缓存 / 短链 / 限流客户端均有上限
 - 安全响应头：`X-Content-Type-Options`、`X-Frame-Options`、CSP、`Referrer-Policy` 等
