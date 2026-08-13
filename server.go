@@ -2,7 +2,9 @@ package main
 
 import (
 	"io/fs"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,6 +25,8 @@ type Server struct {
 	sk           string
 	sessionAt    time.Time
 	sessionMu    sync.Mutex
+	auditMu      sync.Mutex
+	trustedProxy []*net.IPNet
 }
 
 func newServer(cfg *Config, staticContent fs.FS) *Server {
@@ -42,6 +46,18 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		staticRoot:   sub,
 		sessions:     newSessionManager(cfg.sessionSigningKey(), cfg.authSessionTTL()),
 		loginGuard:   newLoginGuard(),
+	}
+	for _, raw := range cfg.TrustedProxyIPs {
+		raw = strings.TrimSpace(raw)
+		if ip := net.ParseIP(raw); ip != nil {
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				ip, bits = ip4, 32
+			}
+			s.trustedProxy = append(s.trustedProxy, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		} else if _, network, err := net.ParseCIDR(raw); err == nil {
+			s.trustedProxy = append(s.trustedProxy, network)
+		}
 	}
 	s.routes()
 	return s
@@ -168,7 +184,7 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 
 		// 限流
 		if opts.rateLimit {
-			ip := clientIP(r.RemoteAddr)
+			ip := s.requestClientIP(r)
 			if !s.limiter.Allow(ip) {
 				writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "操作太频繁了，请稍后再试")
 				return

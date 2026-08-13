@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +38,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 登录失败指数退避：锁定期内直接拒绝，不比对令牌。
-	ip := clientIP(r.RemoteAddr)
+	ip := s.requestClientIP(r)
 	now := time.Now()
 	if ok, retryAfter := s.loginGuard.allow(ip, now); !ok {
 		secs := int(retryAfter.Seconds())
@@ -156,6 +157,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "shortlink_failed", "生成下载链接失败，请重试")
 		return
 	}
+	s.audit(r, "shortlink_issued", filePath)
 	respJSON, err := downloadJSONResponse("/d/" + token)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "response_failed", "生成下载链接失败，请重试")
@@ -173,7 +175,28 @@ func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
 		return
 	}
+	s.audit(r, "shortlink_accessed", filePath)
 	s.redirectToBaiduDownload(w, r, filePath)
+}
+
+func (s *Server) audit(r *http.Request, event, filePath string) {
+	if s.cfg.AuditLogPath == "" {
+		return
+	}
+	record := map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "event": event, "path": filePath, "ip": s.requestClientIP(r), "user_agent": r.UserAgent()}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	f, err := os.OpenFile(s.cfg.AuditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Printf("[audit] open failed: %v", err)
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(data, '\n'))
 }
 
 func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request, filePath string) {

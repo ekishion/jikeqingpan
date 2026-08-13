@@ -31,6 +31,40 @@ func clientIP(remoteAddr string) string {
 	return strings.TrimSpace(remoteAddr)
 }
 
+func (s *Server) requestClientIP(r *http.Request) string {
+	remote := clientIP(r.RemoteAddr)
+	remoteIP := net.ParseIP(remote)
+	trusted := false
+	for _, network := range s.trustedProxy {
+		if remoteIP != nil && network.Contains(remoteIP) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return remote
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		ip := net.ParseIP(candidate)
+		if ip == nil {
+			continue
+		}
+		isTrusted := false
+		for _, network := range s.trustedProxy {
+			if network.Contains(ip) {
+				isTrusted = true
+				break
+			}
+		}
+		if !isTrusted {
+			return candidate
+		}
+	}
+	return remote
+}
+
 func newCSRFToken() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {

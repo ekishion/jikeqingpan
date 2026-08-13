@@ -40,7 +40,9 @@ type Config struct {
 	ShortLinkMaxUses int `json:"short_link_max_uses"`
 
 	// SessionTTLSeconds 百度 uk/sk 会话缓存有效期，默认 3600。
-	SessionTTLSeconds int `json:"session_ttl_seconds"`
+	SessionTTLSeconds int      `json:"session_ttl_seconds"`
+	TrustedProxyIPs   []string `json:"trusted_proxy_ips"`
+	AuditLogPath      string   `json:"audit_log_path"`
 }
 
 func (c *Config) shortLinkTTL() time.Duration {
@@ -136,6 +138,12 @@ func applyEnvOverrides(c *Config) {
 	if n, ok := envInt("SESSION_TTL_SECONDS"); ok {
 		c.SessionTTLSeconds = n
 	}
+	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_IPS")); v != "" {
+		c.TrustedProxyIPs = strings.Split(v, ",")
+	}
+	if v := strings.TrimSpace(os.Getenv("AUDIT_LOG_PATH")); v != "" {
+		c.AuditLogPath = v
+	}
 }
 
 func envInt(key string) (int, bool) {
@@ -190,6 +198,9 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
 	c.SessionSecret = strings.TrimSpace(c.SessionSecret)
+	for i := range c.TrustedProxyIPs {
+		c.TrustedProxyIPs[i] = strings.TrimSpace(c.TrustedProxyIPs[i])
+	}
 	return nil
 }
 

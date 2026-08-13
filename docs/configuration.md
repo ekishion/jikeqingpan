@@ -38,6 +38,8 @@ openssl rand -hex 24
 | `short_link_ttl_seconds` | `SHORT_LINK_TTL_SECONDS` | `3600` | 短链有效期（秒） |
 | `short_link_max_uses` | `SHORT_LINK_MAX_USES` | `0` | 短链最大使用次数；`0` 不限制 |
 | `session_ttl_seconds` | `SESSION_TTL_SECONDS` | `3600` | 百度 uk/sk 缓存（秒） |
+| `trusted_proxy_ips` | `TRUSTED_PROXY_IPS` | 空 | 允许读取 `X-Forwarded-For` 的反代 IP 或 CIDR；仅填写实际反代来源 |
+| `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化 |
 | — | `CONFIG_PATH` | `config.json` / 容器内 `/data/config.json` | 配置文件路径 |
 | — | `TZ` | — | 时区（Docker 默认 `Asia/Shanghai`） |
 
