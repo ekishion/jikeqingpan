@@ -8,6 +8,7 @@ let currentDir = sessionStorage.getItem(DIR_STORAGE_KEY) || "/";
 let authRequired = false;
 let authenticated = false;
 let toastContainer = null;
+let uiConfig = { showReadme: true, showReadmeOverview: true };
 
 // setButtonLoading 切换按钮的加载态：图标换成旋转指示器、文案临时替换、禁用点击。
 // 还原时恢复原图标与原文案。
@@ -486,6 +487,8 @@ function checkAuth() {
       }
       authRequired = !!result.data.auth_required;
       authenticated = !!result.data.authenticated;
+      uiConfig.showReadme = result.data.show_readme !== false;
+      uiConfig.showReadmeOverview = result.data.show_readme_overview !== false;
       updateAuthUI();
       if (authRequired && !authenticated) {
         // 首次进入尚未发生错误，弹窗内不显示错误文案
@@ -648,12 +651,17 @@ function loadFiles(dir) {
   const countEl = document.getElementById("file-count");
   const refreshBtn = document.getElementById("btn-refresh");
   const bannerEl = document.getElementById("list-banner");
+  const readmePanel = document.getElementById("readme-panel");
 
   renderBreadcrumbs();
   listEl.replaceChildren();
   if (bannerEl) {
     bannerEl.hidden = true;
     bannerEl.replaceChildren();
+  }
+  if (readmePanel) {
+    readmePanel.hidden = true;
+    readmePanel.replaceChildren();
   }
   statusEl.style.display = "block";
   statusEl.replaceChildren();
@@ -735,6 +743,8 @@ function loadFiles(dir) {
         frag.appendChild(buildFileItem(files[i]));
       }
       listEl.appendChild(frag);
+      const readmeFile = findReadmeFile(files);
+      if (uiConfig.showReadme && readmeFile) loadReadme(readmeFile.path || "", files, targetDir);
     })
     .catch(function (err) {
       if (refreshBtn) refreshBtn.disabled = false;
@@ -753,6 +763,120 @@ function loadFiles(dir) {
       if (countEl) countEl.textContent = "加载失败";
       console.warn("[网盘] 列表失败", err);
     });
+}
+
+function findReadmeFile(files) {
+  const priority = { "readme.md": 1, "readme.markdown": 2, "readme.txt": 3, "readme": 4 };
+  let match = null;
+  let rank = 100;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (Number(file.isdir) === 1) continue;
+    const name = (file.server_filename || file.filename || "").toLowerCase();
+    if (priority[name] && priority[name] < rank) {
+      match = file;
+      rank = priority[name];
+    }
+  }
+  return match;
+}
+
+function loadReadme(path, files, dir) {
+  const panel = document.getElementById("readme-panel");
+  if (!panel) return;
+  apiFetch("/api/readme", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: path })
+  })
+    .then(function (resp) {
+      return resp.text().then(function (text) {
+        if (!resp.ok) throw new Error(parseAPIError(resp, text));
+        return JSON.parse(text);
+      });
+    })
+    .then(function (data) {
+      if (!data.found) return;
+      const heading = document.createElement("div");
+      heading.className = "readme-heading";
+      const readmeIcon = document.createElement("div");
+      readmeIcon.className = "readme-icon file-icon";
+      readmeIcon.appendChild(makeIcon("file-text"));
+      heading.appendChild(readmeIcon);
+      const titleWrap = document.createElement("div");
+      const title = document.createElement("h2");
+      title.id = "readme-title";
+      title.textContent = data.name || "README";
+      const source = document.createElement("p");
+      source.id = "readme-source";
+      source.textContent = "当前目录说明";
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(source);
+      heading.appendChild(titleWrap);
+      const layout = document.createElement("div");
+      layout.className = "readme-layout";
+      const main = document.createElement("div");
+      main.className = "readme-main";
+      const content = document.createElement("div");
+      content.id = "readme-content";
+      renderMarkdown(content, data.content || "");
+      main.appendChild(heading);
+      main.appendChild(content);
+      layout.appendChild(main);
+      if (uiConfig.showReadmeOverview) {
+        layout.appendChild(buildReadmeOverview(files || [], dir || "/"));
+      }
+      panel.replaceChildren(layout);
+      panel.hidden = false;
+    })
+    .catch(function (err) {
+      console.warn("[网盘] README 加载失败", err);
+    });
+}
+
+function buildReadmeOverview(files, dir) {
+  const overview = document.createElement("aside");
+  overview.className = "readme-overview";
+  overview.setAttribute("aria-label", "目录概览");
+
+  const title = document.createElement("h3");
+  title.textContent = "目录概览";
+  overview.appendChild(title);
+
+  let fileCount = 0;
+  let folderCount = 0;
+  let totalSize = 0;
+  let latest = 0;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (Number(file.isdir) === 1) folderCount++;
+    else {
+      fileCount++;
+      totalSize += Number(file.size) || 0;
+    }
+    latest = Math.max(latest, Number(file.server_mtime || file.server_ctime) || 0);
+  }
+
+  appendOverviewItem(overview, "文件", String(fileCount));
+  appendOverviewItem(overview, "文件夹", String(folderCount));
+  appendOverviewItem(overview, "大小", formatSize(totalSize));
+  appendOverviewItem(overview, "位置", dir === "/" ? "根目录" : dir);
+  if (latest) appendOverviewItem(overview, "最近更新", formatTime(latest));
+  return overview;
+}
+
+function appendOverviewItem(root, label, value) {
+  const item = document.createElement("div");
+  item.className = "overview-item";
+  const labelEl = document.createElement("span");
+  labelEl.className = "overview-label";
+  labelEl.textContent = label;
+  const valueEl = document.createElement("strong");
+  valueEl.className = "overview-value";
+  valueEl.textContent = value;
+  item.appendChild(labelEl);
+  item.appendChild(valueEl);
+  root.appendChild(item);
 }
 
 function resetFileSearch() {

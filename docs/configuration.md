@@ -41,6 +41,8 @@ openssl rand -hex 24
 | `trusted_proxy_ips` | `TRUSTED_PROXY_IPS` | 空 | 允许读取 `X-Forwarded-For` 的反代 IP 或 CIDR；仅填写实际反代来源 |
 | `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化，父目录不存在时会自动创建 |
 | `allowed_paths` | `ALLOWED_PATHS` | 空 | 共享目录白名单；配置后仅允许这些目录及其子目录访问，多个环境变量路径用英文逗号分隔 |
+| `show_readme` | `SHOW_README` | `true` | 是否在目录顶部展示网盘中的 README |
+| `show_readme_overview` | `SHOW_README_OVERVIEW` | `true` | 是否在 README 右侧展示目录概览 |
 | — | `CONFIG_PATH` | `config.json` / 容器内 `/data/config.json` | 配置文件路径 |
 | — | `TZ` | — | 时区（Docker 默认 `Asia/Shanghai`） |
 

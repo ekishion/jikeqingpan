@@ -40,10 +40,20 @@ type Config struct {
 	ShortLinkMaxUses int `json:"short_link_max_uses"`
 
 	// SessionTTLSeconds 百度 uk/sk 会话缓存有效期，默认 3600。
-	SessionTTLSeconds int      `json:"session_ttl_seconds"`
-	TrustedProxyIPs   []string `json:"trusted_proxy_ips"`
-	AuditLogPath      string   `json:"audit_log_path"`
-	AllowedPaths      []string `json:"allowed_paths"`
+	SessionTTLSeconds  int      `json:"session_ttl_seconds"`
+	TrustedProxyIPs    []string `json:"trusted_proxy_ips"`
+	AuditLogPath       string   `json:"audit_log_path"`
+	AllowedPaths       []string `json:"allowed_paths"`
+	ShowReadme         *bool    `json:"show_readme"`
+	ShowReadmeOverview *bool    `json:"show_readme_overview"`
+}
+
+func (c *Config) showReadme() bool {
+	return c.ShowReadme == nil || *c.ShowReadme
+}
+
+func (c *Config) showReadmeOverview() bool {
+	return c.ShowReadmeOverview == nil || *c.ShowReadmeOverview
 }
 
 func (c *Config) shortLinkTTL() time.Duration {
@@ -147,6 +157,14 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("ALLOWED_PATHS")); v != "" {
 		c.AllowedPaths = strings.Split(v, ",")
+	}
+	if v := strings.TrimSpace(os.Getenv("SHOW_README")); v != "" {
+		value := parseBoolEnv(v)
+		c.ShowReadme = &value
+	}
+	if v := strings.TrimSpace(os.Getenv("SHOW_README_OVERVIEW")); v != "" {
+		value := parseBoolEnv(v)
+		c.ShowReadmeOverview = &value
 	}
 }
 

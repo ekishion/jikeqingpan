@@ -402,6 +402,135 @@ body.lightbox-open { overflow: hidden; }
   gap: 8px;
 }
 
+.readme-panel {
+  margin-bottom: 12px;
+  padding: 18px 20px 20px;
+  background: linear-gradient(135deg, var(--surface) 0%, var(--surface-sunken) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+}
+.readme-panel[hidden] { display: none; }
+.readme-heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  color: var(--text);
+}
+.readme-icon .icon {
+  width: 20px;
+  height: 20px;
+}
+.readme-icon { flex-shrink: 0; }
+.readme-heading h2 {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.readme-heading p {
+  margin: 2px 0 0;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+#readme-content {
+  max-height: 360px;
+  max-width: min(760px, calc(100vw - 96px));
+  margin: 15px 0 0 51px;
+  overflow: auto;
+  color: var(--text-2);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+.readme-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 28px;
+  align-items: start;
+}
+.readme-main { min-width: 0; }
+.readme-overview {
+  padding: 10px 16px 0;
+  border-left: 1px solid var(--border);
+}
+.readme-overview h3 {
+  margin: 0 0 13px;
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.overview-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.overview-label { color: var(--text-3); font-size: 0.72rem; }
+.overview-value {
+  max-width: 145px;
+  overflow: hidden;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#readme-content > :first-child { margin-top: 0; }
+#readme-content > :last-child { margin-bottom: 0; }
+#readme-content h1,
+#readme-content h2,
+#readme-content h3,
+#readme-content h4,
+#readme-content h5,
+#readme-content h6 { color: var(--text); line-height: 1.35; }
+#readme-content h1 { font-size: 1.15rem; }
+#readme-content h2 { font-size: 1.02rem; }
+#readme-content h3,
+#readme-content h4,
+#readme-content h5,
+#readme-content h6 { font-size: 0.9rem; }
+#readme-content p { margin: 0.7em 0; white-space: pre-wrap; }
+#readme-content ul,
+#readme-content ol { margin: 0.7em 0; padding-left: 1.5em; }
+#readme-content li + li { margin-top: 0.25em; }
+#readme-content blockquote {
+  margin: 0.8em 0;
+  padding-left: 12px;
+  color: var(--text-3);
+  border-left: 2px solid var(--border-strong);
+}
+#readme-content hr { border: 0; border-top: 1px solid var(--border); }
+#readme-content code {
+  padding: 0.1em 0.35em;
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+#readme-content .readme-code {
+  margin: 0.8em 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  line-height: 1.65;
+  white-space: pre;
+}
+#readme-content .readme-code code { padding: 0; background: transparent; border: 0; }
+#readme-content a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+
 .file-item {
   position: relative;
   background: var(--surface);
@@ -869,6 +998,11 @@ body.lightbox-open { overflow: hidden; }
   .file-action { min-width: 0; padding: 7px 8px; gap: 4px; }
   .file-action .icon { flex: 0 0 15px; }
   .file-action span { white-space: nowrap; }
+
+  .readme-panel { padding: 15px 14px 16px; }
+  .readme-layout { display: block; }
+  #readme-content { max-height: 300px; max-width: none; margin-left: 51px; font-size: 0.74rem; }
+  .readme-overview { margin: 18px 0 0 51px; padding: 14px 0 0; border-top: 1px solid var(--border); border-left: 0; }
 
   #image-lightbox { padding: 56px 10px 60px; }
   #lightbox-image { max-width: 96vw; max-height: calc(100svh - 132px); }

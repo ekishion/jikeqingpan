@@ -18,7 +18,7 @@
 ├── loginguard.go        # 登录失败按 IP 指数退避锁定
 ├── security_test.go     # 安全相关单测
 ├── auth_test.go         # 登录 / 会话 / 防爆破单测
-├── static/              # 前端（go:embed）
+├── static/              # 前端（go:embed，markdown.js 负责 README 安全渲染）
 │   ├── index.html       # 页面结构
 │   ├── app.css          # 样式（纯白极简 · 深色跟随系统）
 │   └── app.js           # 逻辑 + 内联 Lucide 图标

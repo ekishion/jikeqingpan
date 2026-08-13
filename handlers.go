@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -30,8 +31,10 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	enabled := s.cfg.authEnabled()
 	authenticated := !enabled || s.hasValidAccess(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"auth_required": enabled,
-		"authenticated": authenticated,
+		"auth_required":        enabled,
+		"authenticated":        authenticated,
+		"show_readme":          s.cfg.showReadme(),
+		"show_readme_overview": s.cfg.showReadmeOverview(),
 	})
 }
 
@@ -134,6 +137,83 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(publicBody)
+}
+
+// handleReadme 读取当前目录中的 README 文件，并返回给前端安全渲染。
+func (s *Server) handleReadme(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var request struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
+		return
+	}
+	readmePath := request.Path
+	if !isValidBaiduPath(readmePath) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
+		return
+	}
+	if !isReadmeFileName(readmeName(readmePath)) {
+		writeJSONError(w, http.StatusNotFound, "readme_not_found", "README 不存在")
+		return
+	}
+	if !s.pathAllowed(readmePath) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该目录不在共享范围内")
+		return
+	}
+
+	dlink, err := s.getBaiduDLink(readmePath, r.Header.Get("User-Agent"))
+	if err != nil || !isAllowedBaiduDownloadURL(dlink) {
+		writeJSONError(w, http.StatusBadGateway, "readme_link_failed", "无法准备 README")
+		return
+	}
+	upstream, err := s.httpClient.Get(dlink)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "readme_fetch_failed", "无法读取 README")
+		return
+	}
+	defer upstream.Body.Close()
+	if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+		writeJSONError(w, http.StatusBadGateway, "readme_fetch_failed", "README 暂时不可用")
+		return
+	}
+	const maxReadmeBytes = 512 * 1024
+	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxReadmeBytes+1))
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "readme_fetch_failed", "无法读取 README")
+		return
+	}
+	if len(body) > maxReadmeBytes {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "readme_too_large", "README 超过 512 KB，无法展示")
+		return
+	}
+	if !utf8.Valid(body) {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "readme_not_text", "README 不是可展示的文本文件")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"found":   true,
+		"name":    readmeName(readmePath),
+		"content": string(body),
+	})
+}
+
+func readmeName(filePath string) string {
+	if index := strings.LastIndex(filePath, "/"); index >= 0 {
+		return filePath[index+1:]
+	}
+	return filePath
+}
+
+func isReadmeFileName(name string) bool {
+	switch strings.ToLower(name) {
+	case "readme.md", "readme.markdown", "readme.txt", "readme":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) filterFileList(body []byte) ([]byte, error) {

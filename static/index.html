@@ -82,6 +82,23 @@
     </div>
 
     <div id="list-banner" hidden></div>
+    <section id="readme-panel" class="readme-panel" hidden aria-labelledby="readme-title">
+      <div class="readme-layout">
+        <div class="readme-main">
+          <div class="readme-heading">
+            <div class="readme-icon file-icon" aria-hidden="true">
+              <span data-icon="file-text"></span>
+            </div>
+            <div>
+              <h2 id="readme-title">目录说明</h2>
+              <p id="readme-source">README</p>
+            </div>
+          </div>
+          <div id="readme-content"></div>
+        </div>
+        <aside id="readme-overview" class="readme-overview" aria-label="目录概览"></aside>
+      </div>
+    </section>
     <div id="file-list"></div>
 
     <div id="status">
@@ -103,6 +120,7 @@
   </div>
 
   <script src="/icons.js"></script>
+  <script src="/markdown.js"></script>
   <script src="/app.js"></script>
 </body>
 

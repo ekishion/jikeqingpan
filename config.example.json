@@ -13,5 +13,7 @@
   "session_ttl_seconds": 3600,
   "trusted_proxy_ips": ["127.0.0.1", "::1"],
   "audit_log_path": "./data/download-audit.jsonl",
-  "allowed_paths": []
+  "allowed_paths": [],
+  "show_readme": true,
+  "show_readme_overview": true
 }

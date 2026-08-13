@@ -31,6 +31,8 @@
 GET /api/auth/status
 ```
 
+响应还会返回前端展示配置：`show_readme` 和 `show_readme_overview`，分别控制目录 README 和右侧目录概览。
+
 ### 登录
 
 ```http
@@ -67,6 +69,22 @@ X-CSRF-Token: <csrf_token>
 - 响应中的 `dlink` 会在返回前剥离
 - 自动翻页合并（每页 100，最多约 15 页）
 - 若截断会带 `truncated: true`、`list_pages` 等字段
+
+### 目录 README
+
+前端会识别当前目录中的 `README.md`、`README.markdown`、`README.txt` 或 `README`，并在文件列表上方安全渲染。接口由前端按需调用：
+
+```http
+POST /api/readme
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{"path": "/示例目录/README.md"}
+```
+
+- 优先级为 `README.md`、`README.markdown`、`README.txt`、`README`
+- 接口只接受上述四种 README 文件名；内容上限为 512 KB，超出后不展示
+- 支持标题、段落、列表、引用、代码、链接等常用 Markdown；原始 HTML 和脚本不会执行
 
 ## 下载短链
 
@@ -135,4 +153,4 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`preview_not_image`、`preview_too_large` 等。
+常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`readme_not_found`、`readme_link_failed`、`readme_too_large`、`readme_not_text`、`preview_not_image`、`preview_too_large` 等。
