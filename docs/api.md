@@ -118,4 +118,4 @@ GET /d/{token}
 }
 ```
 
-常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found` 等。
+常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found` 等。

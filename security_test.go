@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -30,6 +31,108 @@ func TestIsValidBaiduPath(t *testing.T) {
 		if got := isValidBaiduPath(tc.in); got != tc.want {
 			t.Fatalf("isValidBaiduPath(%q)=%v want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestAllowedPathScope(t *testing.T) {
+	cfg := &Config{BaiduCookie: "cookie", AllowedPaths: []string{" /共享资料 ", "/共享资料/电影"}}
+	if err := cfg.normalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{cfg: cfg}
+	for _, p := range []string{"/共享资料", "/共享资料/文档/a.txt", "/共享资料/电影/movie.mp4"} {
+		if !srv.pathAllowed(p) {
+			t.Fatalf("expected allowed path %q", p)
+		}
+	}
+	for _, p := range []string{"/私人文件", "/共享资料2", "/共享"} {
+		if srv.pathAllowed(p) {
+			t.Fatalf("expected denied path %q", p)
+		}
+	}
+}
+
+func TestNestedAllowedPathKeepsOnlyNavigationAncestorsVisible(t *testing.T) {
+	cfg := &Config{BaiduCookie: "cookie", AllowedPaths: []string{"/共享资料/电影"}}
+	if err := cfg.normalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{cfg: cfg}
+	if !srv.pathNavigable("/") || !srv.pathNavigable("/共享资料") {
+		t.Fatal("ancestors of an allowed path should remain navigable")
+	}
+	if srv.pathNavigable("/私人文件") {
+		t.Fatal("unrelated directory should not be navigable")
+	}
+	if !srv.pathVisible("/共享资料/电影") || !srv.pathVisible("/共享资料") {
+		t.Fatal("allowed path and its navigation ancestor should be visible")
+	}
+	if srv.pathVisible("/共享资料/其他") {
+		t.Fatal("unallowed sibling should be hidden")
+	}
+}
+
+func TestFilterFileListHidesUnallowedEntries(t *testing.T) {
+	cfg := &Config{BaiduCookie: "cookie", AllowedPaths: []string{"/共享资料/电影"}}
+	if err := cfg.normalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{cfg: cfg}
+	body := []byte(`{"errno":0,"list":[{"path":"/共享资料","isdir":1},{"path":"/共享资料/电影","isdir":1},{"path":"/共享资料/其他","isdir":1},{"path":"/私人文件/a.txt","isdir":0}]}`)
+	filtered, err := srv.filterFileList(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(filtered), "/共享资料/其他") || strings.Contains(string(filtered), "/私人文件/a.txt") {
+		t.Fatalf("unallowed entries leaked: %s", filtered)
+	}
+	if !strings.Contains(string(filtered), "/共享资料/电影") || !strings.Contains(string(filtered), "/共享资料\"") {
+		t.Fatalf("allowed entry or navigation ancestor missing: %s", filtered)
+	}
+}
+
+func TestDownloadAndListingRejectUnallowedPath(t *testing.T) {
+	srv := testAuthServer(t)
+	srv.cfg.AllowedPaths = []string{"/共享资料"}
+	csrf := csrfHandshake(t, srv)
+
+	get := httptest.NewRequest(http.MethodGet, "/api/files?dir=/私人文件", nil)
+	get.Header.Set("X-Access-Token", "s3cret-token")
+	get.AddCookie(csrf)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, get)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "path_not_allowed") {
+		t.Fatalf("listing should reject unallowed path, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/api/download", strings.NewReader(`{"path":"/私人文件/a.txt"}`))
+	post.Header.Set("Content-Type", "application/json")
+	post.Header.Set("X-Access-Token", "s3cret-token")
+	post.Header.Set("X-CSRF-Token", csrf.Value)
+	post.AddCookie(csrf)
+	rec = httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, post)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "path_not_allowed") {
+		t.Fatalf("download should reject unallowed path, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	token, err := srv.shortLinks.create("/私人文件/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := httptest.NewRequest(http.MethodGet, "/d/"+token, nil)
+	short.Header.Set("X-Access-Token", "s3cret-token")
+	rec = httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, short)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "path_not_allowed") {
+		t.Fatalf("shortlink should reject path after allowlist change, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInvalidAllowedPathConfig(t *testing.T) {
+	cfg := &Config{BaiduCookie: "cookie", AllowedPaths: []string{"/共享资料/../私人"}}
+	if err := cfg.normalizeAndValidate(); err == nil {
+		t.Fatal("invalid allowed path should fail config validation")
 	}
 }
 
@@ -187,6 +290,7 @@ func TestLoadConfigEnvOnlyWhenFileMissing(t *testing.T) {
 	t.Setenv("BIND_ADDRESS", "0.0.0.0")
 	t.Setenv("PORT", "18080")
 	t.Setenv("FORCE_SECURE_COOKIE", "true")
+	t.Setenv("ALLOWED_PATHS", "/共享资料,/临时中转")
 
 	cfg, err := loadConfig("this-file-should-not-exist-jikeqingpan.json")
 	if err != nil {
@@ -207,6 +311,9 @@ func TestLoadConfigEnvOnlyWhenFileMissing(t *testing.T) {
 	if !cfg.ForceSecureCookie {
 		t.Fatal("force_secure_cookie expected true")
 	}
+	if len(cfg.AllowedPaths) != 2 || cfg.AllowedPaths[0] != "/共享资料" || cfg.AllowedPaths[1] != "/临时中转" {
+		t.Fatalf("allowed paths=%v", cfg.AllowedPaths)
+	}
 }
 
 func TestLoadConfigEnvOverridesFile(t *testing.T) {
@@ -217,6 +324,7 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
   "bind_address": "127.0.0.1",
   "baidu_cookie": "file-cookie",
   "access_token": "file-token",
+  "allowed_paths": ["/文件"],
   "force_secure_cookie": false
 }`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
@@ -235,5 +343,8 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.BindAddress != "127.0.0.1" {
 		t.Fatalf("bind should stay from file: %q", cfg.BindAddress)
+	}
+	if len(cfg.AllowedPaths) != 1 || cfg.AllowedPaths[0] != "/文件" {
+		t.Fatalf("allowed paths should load from file: %v", cfg.AllowedPaths)
 	}
 }

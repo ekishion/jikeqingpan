@@ -43,6 +43,7 @@ type Config struct {
 	SessionTTLSeconds int      `json:"session_ttl_seconds"`
 	TrustedProxyIPs   []string `json:"trusted_proxy_ips"`
 	AuditLogPath      string   `json:"audit_log_path"`
+	AllowedPaths      []string `json:"allowed_paths"`
 }
 
 func (c *Config) shortLinkTTL() time.Duration {
@@ -144,6 +145,9 @@ func applyEnvOverrides(c *Config) {
 	if v := strings.TrimSpace(os.Getenv("AUDIT_LOG_PATH")); v != "" {
 		c.AuditLogPath = v
 	}
+	if v := strings.TrimSpace(os.Getenv("ALLOWED_PATHS")); v != "" {
+		c.AllowedPaths = strings.Split(v, ",")
+	}
 }
 
 func envInt(key string) (int, bool) {
@@ -201,6 +205,20 @@ func (c *Config) normalizeAndValidate() error {
 	for i := range c.TrustedProxyIPs {
 		c.TrustedProxyIPs[i] = strings.TrimSpace(c.TrustedProxyIPs[i])
 	}
+	seenAllowed := make(map[string]struct{}, len(c.AllowedPaths))
+	normalizedAllowed := make([]string, 0, len(c.AllowedPaths))
+	for _, raw := range c.AllowedPaths {
+		allowed := strings.TrimSpace(raw)
+		if allowed == "" || !isValidBaiduPath(allowed) {
+			return fmt.Errorf("allowed_paths contains an invalid path: %q", raw)
+		}
+		if _, exists := seenAllowed[allowed]; exists {
+			continue
+		}
+		seenAllowed[allowed] = struct{}{}
+		normalizedAllowed = append(normalizedAllowed, allowed)
+	}
+	c.AllowedPaths = normalizedAllowed
 	return nil
 }
 

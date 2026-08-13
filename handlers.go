@@ -102,6 +102,10 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
 		return
 	}
+	if !s.pathNavigable(dir) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该目录不在共享范围内")
+		return
+	}
 
 	result, err := s.fetchFileList(dir)
 	if err != nil {
@@ -118,9 +122,50 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败，请稍后重试")
 		return
 	}
+	publicBody, err = s.filterFileList(publicBody)
+	if err != nil {
+		log.Printf("[ERROR] 过滤共享范围失败: %v", err)
+		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(publicBody)
+}
+
+func (s *Server) filterFileList(body []byte) ([]byte, error) {
+	if s == nil || s.cfg == nil || len(s.cfg.AllowedPaths) == 0 {
+		return body, nil
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	listRaw, ok := response["list"]
+	if !ok {
+		return body, nil
+	}
+	var list []map[string]json.RawMessage
+	if err := json.Unmarshal(listRaw, &list); err != nil {
+		return nil, err
+	}
+	filtered := make([]map[string]json.RawMessage, 0, len(list))
+	for _, item := range list {
+		var itemPath string
+		if err := json.Unmarshal(item["path"], &itemPath); err != nil || !isValidBaiduPath(itemPath) {
+			continue
+		}
+		if s.pathVisible(itemPath) {
+			filtered = append(filtered, item)
+		}
+	}
+	cleanList, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, err
+	}
+	response["list"] = cleanList
+	response["list_items"] = json.RawMessage(strconv.Itoa(len(filtered)))
+	return json.Marshal(response)
 }
 
 // handleDownload 仅创建不透明短链接；真实百度直链在 /d/{token} 时再解析。
@@ -141,6 +186,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if !isValidBaiduPath(filePath) {
 		log.Printf("[WARN] 非法路径请求被拒绝: %q", filePath)
 		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
+		return
+	}
+	if !s.pathAllowed(filePath) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
 		return
 	}
 
@@ -173,6 +222,10 @@ func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 	filePath, ok := s.shortLinks.resolve(token, true)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
+		return
+	}
+	if !s.pathAllowed(filePath) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
 		return
 	}
 	s.audit(r, "shortlink_accessed", filePath)
