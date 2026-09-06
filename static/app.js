@@ -4,11 +4,152 @@
 
 // ===== 全局状态 =====
 const DIR_STORAGE_KEY = "jikeqingpan_current_dir";
+const SORT_STORAGE_KEY = "jikeqingpan_sort";
+const THEME_STORAGE_KEY = "jikeqingpan_theme";
 let currentDir = sessionStorage.getItem(DIR_STORAGE_KEY) || "/";
 let authRequired = false;
 let authenticated = false;
 let toastContainer = null;
 let uiConfig = { showReadme: true, showReadmeOverview: true };
+// 当前目录的文件数据与截断信息：排序切换时本地重渲染，不重新请求
+let currentFiles = [];
+let lastTruncated = false;
+let lastPageLimit = 1500;
+let sortState = { key: "name", dir: "asc" };
+// 当前目录 README 的取回缓存，避免排序切换重渲染时重复请求
+let readmeCache = null;
+
+// ===== 主题（手动深/浅切换，未选择时跟随系统） =====
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+  const btn = document.getElementById("btn-theme");
+  if (btn) {
+    const iconWrap = btn.querySelector(".btn-icon");
+    if (iconWrap) {
+      iconWrap.replaceChildren(makeIcon(theme === "dark" ? "sun" : "moon"));
+      // 标记已挂载，防止 mountIcons 再追加一份导致双图标
+      iconWrap.dataset.iconMounted = "1";
+    }
+    btn.setAttribute("aria-label", theme === "dark" ? "切换到浅色模式" : "切换到深色模式");
+  }
+}
+
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+
+function initTheme() {
+  let stored = null;
+  try { stored = localStorage.getItem(THEME_STORAGE_KEY); } catch (e) { /* ignore */ }
+  if (stored !== "light" && stored !== "dark") {
+    stored = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  applyTheme(stored);
+}
+
+function toggleTheme() {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch (e) { /* ignore */ }
+}
+
+// ===== 排序状态（字段 + 方向，持久化到 localStorage） =====
+
+function loadSortState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) || "null");
+    if (parsed && ["name", "size", "time"].indexOf(parsed.key) !== -1 &&
+      ["asc", "desc"].indexOf(parsed.dir) !== -1) {
+      sortState = { key: parsed.key, dir: parsed.dir };
+    }
+  } catch (e) { /* ignore */ }
+  syncSortControls();
+}
+
+function saveSortState() {
+  try { localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sortState)); } catch (e) { /* ignore */ }
+}
+
+const SORT_FIELD_LABELS = { name: "名称", size: "大小", time: "时间" };
+
+function syncSortControls() {
+  const trigger = document.getElementById("btn-sort-field");
+  const dirBtn = document.getElementById("btn-sort-dir");
+  const menu = document.getElementById("sort-menu");
+  const label = document.getElementById("sort-field-label");
+  if (label) label.textContent = SORT_FIELD_LABELS[sortState.key] || "名称";
+  if (menu) {
+    const options = menu.querySelectorAll(".sort-option");
+    for (let i = 0; i < options.length; i++) {
+      const opt = options[i];
+      const active = opt.dataset.key === sortState.key;
+      opt.classList.toggle("is-active", active);
+      opt.setAttribute("aria-selected", active ? "true" : "false");
+    }
+  }
+  if (dirBtn) {
+    const iconWrap = dirBtn.querySelector(".btn-icon");
+    if (iconWrap) {
+      iconWrap.replaceChildren(makeIcon(sortState.dir === "asc" ? "arrow-up" : "arrow-down"));
+      // 标记已挂载，防止 mountIcons 再追加一份导致双图标
+      iconWrap.dataset.iconMounted = "1";
+    }
+    dirBtn.setAttribute("aria-label", sortState.dir === "asc" ? "当前升序，点击切换为降序" : "当前降序，点击切换为升序");
+  }
+}
+
+function setSortMenuOpen(open) {
+  const menu = document.getElementById("sort-menu");
+  const trigger = document.getElementById("btn-sort-field");
+  if (!menu || !trigger) return;
+  menu.hidden = !open;
+  trigger.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+// bindSortControls 绑定排序下拉（自绘菜单，替代原生 select 的系统样式）
+// 与升降序切换按钮；点击外部或 Escape 关闭菜单。
+function bindSortControls() {
+  const trigger = document.getElementById("btn-sort-field");
+  const menu = document.getElementById("sort-menu");
+  const dirBtn = document.getElementById("btn-sort-dir");
+
+  if (trigger && menu && !trigger.dataset.bound) {
+    trigger.dataset.bound = "1";
+    trigger.addEventListener("click", function (e) {
+      e.stopPropagation();
+      setSortMenuOpen(menu.hidden);
+    });
+    menu.addEventListener("click", function (e) {
+      e.stopPropagation();
+    });
+    const options = menu.querySelectorAll(".sort-option");
+    for (let i = 0; i < options.length; i++) {
+      options[i].addEventListener("click", function () {
+        if (sortState.key !== options[i].dataset.key) {
+          sortState.key = options[i].dataset.key;
+          saveSortState();
+          syncSortControls();
+          renderCurrentList(currentDir);
+        }
+        setSortMenuOpen(false);
+      });
+    }
+    document.addEventListener("click", function () {
+      setSortMenuOpen(false);
+    });
+  }
+
+  if (dirBtn && !dirBtn.dataset.bound) {
+    dirBtn.dataset.bound = "1";
+    dirBtn.addEventListener("click", function () {
+      sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+      saveSortState();
+      syncSortControls();
+      renderCurrentList(currentDir);
+    });
+  }
+}
 
 // setButtonLoading 切换按钮的加载态：图标换成旋转指示器、文案临时替换、禁用点击。
 // 还原时恢复原图标与原文案。
@@ -173,13 +314,39 @@ function showToast(msg, type) {
   toast._timer = setTimeout(dismiss, TOAST_DURATION);
 }
 
-function setCurrentDir(dir) {
+function setCurrentDir(dir, opts) {
   currentDir = dir || "/";
   try {
     sessionStorage.setItem(DIR_STORAGE_KEY, currentDir);
   } catch (e) {
     /* ignore */
   }
+  syncUrlDir(currentDir, opts);
+}
+
+// syncUrlDir 把当前目录同步到地址栏（?dir=...），支持浏览器前进/后退。
+// mode: "push"（默认，用户主动进入目录）| "replace"（初始加载）| "none"（popstate 还原）。
+function syncUrlDir(dir, opts) {
+  const mode = opts && opts.mode ? opts.mode : "push";
+  if (mode === "none" || !window.history || !window.history.pushState) return;
+  const url = dir === "/" ? location.pathname : location.pathname + "?dir=" + encodeURIComponent(dir);
+  try {
+    if (mode === "replace") history.replaceState({ dir: dir }, "", url);
+    else history.pushState({ dir: dir }, "", url);
+  } catch (e) {
+    /* file:// 等环境不支持，忽略 */
+  }
+}
+
+function dirFromLocation() {
+  try {
+    const dir = new URLSearchParams(window.location.search).get("dir");
+    // 只接受形如 /xxx 的路径，且拒绝包含 .. 的可疑值
+    if (dir && dir.charAt(0) === "/" && dir.indexOf("..") === -1) return dir;
+  } catch (e) {
+    /* ignore */
+  }
+  return null;
 }
 
 function parseAPIError(resp, bodyText) {
@@ -322,6 +489,8 @@ function ensureLoginUI() {
   return overlay;
 }
 
+let lastFocusedBeforeModal = null;
+
 function showLogin(show) {
   const overlay = ensureLoginUI();
   if (show) {
@@ -340,6 +509,10 @@ function showLogin(show) {
   if (app) app.setAttribute("aria-hidden", show ? "true" : "false");
 
   if (show) {
+    // 记住触发焦点，关闭后还原（模态无障碍）
+    if (document.activeElement && document.activeElement !== document.body) {
+      lastFocusedBeforeModal = document.activeElement;
+    }
     const input = document.getElementById("login-token");
     if (input) {
       // 不强制清空，方便输错后重试
@@ -347,6 +520,14 @@ function showLogin(show) {
         input.focus();
         input.select();
       }, 50);
+    }
+  } else if (lastFocusedBeforeModal && lastFocusedBeforeModal.focus) {
+    const el = lastFocusedBeforeModal;
+    lastFocusedBeforeModal = null;
+    try {
+      el.focus();
+    } catch (e) {
+      /* ignore */
     }
   }
 }
@@ -591,21 +772,22 @@ function renderBreadcrumbs() {
   if (!container) return;
   container.replaceChildren();
 
-  const rootSpan = document.createElement("span");
   if (currentDir === "/") {
+    const rootSpan = document.createElement("span");
     rootSpan.className = "breadcrumb-current";
     rootSpan.textContent = "根目录";
     container.appendChild(rootSpan);
-  } else {
-    rootSpan.className = "breadcrumb-item";
-    rootSpan.textContent = "根目录";
-    rootSpan.addEventListener("click", function () {
-      enterDir("/");
-    });
-    container.appendChild(rootSpan);
+    return;
   }
 
-  if (currentDir === "/") return;
+  const rootBtn = document.createElement("button");
+  rootBtn.type = "button";
+  rootBtn.className = "breadcrumb-item";
+  rootBtn.textContent = "根目录";
+  rootBtn.addEventListener("click", function () {
+    enterDir("/");
+  });
+  container.appendChild(rootBtn);
 
   const parts = currentDir.split("/").filter(function (p) {
     return p !== "";
@@ -619,21 +801,22 @@ function renderBreadcrumbs() {
     container.appendChild(sep);
 
     accPath += "/" + part;
-    const isLast = index === parts.length - 1;
-    const span = document.createElement("span");
-    if (isLast) {
-      span.className = "breadcrumb-current";
-      span.textContent = part;
-      container.appendChild(span);
-    } else {
-      span.className = "breadcrumb-item";
-      span.textContent = part;
-      const targetPath = accPath;
-      span.addEventListener("click", function () {
-        enterDir(targetPath);
-      });
-      container.appendChild(span);
+    if (index === parts.length - 1) {
+      const cur = document.createElement("span");
+      cur.className = "breadcrumb-current";
+      cur.textContent = part;
+      container.appendChild(cur);
+      return;
     }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "breadcrumb-item";
+    btn.textContent = part;
+    const targetPath = accPath;
+    btn.addEventListener("click", function () {
+      enterDir(targetPath);
+    });
+    container.appendChild(btn);
   });
 }
 
@@ -663,6 +846,7 @@ function loadFiles(dir) {
     readmePanel.hidden = true;
     readmePanel.replaceChildren();
   }
+  readmeCache = null;
   statusEl.style.display = "block";
   statusEl.replaceChildren();
 
@@ -686,8 +870,9 @@ function loadFiles(dir) {
     .then(function (resp) {
       return resp.text().then(function (text) {
         if (resp.status === 401) {
-          requireLogin(parseAPIError(resp, text));
-          throw new Error(parseAPIError(resp, text));
+          const message = parseAPIError(resp, text);
+          requireLogin(message);
+          throw new Error(message);
         }
         if (!resp.ok) {
           throw new Error(parseAPIError(resp, text));
@@ -705,46 +890,10 @@ function loadFiles(dir) {
         throw new Error("网盘服务返回异常，请稍后重试");
       }
 
-      const files = Array.isArray(data.list) ? data.list : [];
-      sortFiles(files);
-      resetFileSearch();
-
-      if (countEl) {
-        countEl.textContent = data.truncated
-          ? "已显示前 " + files.length + " 项"
-          : "共 " + files.length + " 项";
-      }
-
-      if (data.truncated) {
-        const limit = data.list_page_limit || 1500;
-        renderBanner(
-          "warning",
-          "文件较多，当前仅显示前 " + limit + " 项。进入子文件夹可查看完整内容。"
-        );
-      }
-
-      // 用 DocumentFragment 批量插入，避免逐行 appendChild 触发多次回流
-      const frag = document.createDocumentFragment();
-      if (targetDir !== "/") {
-        frag.appendChild(buildParentItem());
-      }
-
-      if (!files.length) {
-        renderStatusState({
-          icon: "folder-open",
-          title: "这里还没有文件",
-          desc: targetDir === "/" ? "上传文件到网盘后，就会显示在这里" : "该文件夹是空的"
-        });
-        if (frag.childNodes.length) listEl.appendChild(frag);
-        return;
-      }
-
-      for (let i = 0; i < files.length; i++) {
-        frag.appendChild(buildFileItem(files[i]));
-      }
-      listEl.appendChild(frag);
-      const readmeFile = findReadmeFile(files);
-      if (uiConfig.showReadme && readmeFile) loadReadme(readmeFile.path || "", files, targetDir);
+      currentFiles = Array.isArray(data.list) ? data.list : [];
+      lastTruncated = !!data.truncated;
+      lastPageLimit = data.list_page_limit || 1500;
+      renderCurrentList(targetDir);
     })
     .catch(function (err) {
       if (refreshBtn) refreshBtn.disabled = false;
@@ -763,6 +912,56 @@ function loadFiles(dir) {
       if (countEl) countEl.textContent = "加载失败";
       console.warn("[网盘] 列表失败", err);
     });
+}
+
+// renderCurrentList 依据 sortState 渲染当前目录文件列表。
+// 排序切换只重渲染本地数据（currentFiles），不重新请求。
+function renderCurrentList(dir) {
+  const listEl = document.getElementById("file-list");
+  const countEl = document.getElementById("file-count");
+  const bannerEl = document.getElementById("list-banner");
+  const files = currentFiles.slice();
+  sortFiles(files);
+  resetFileSearch();
+
+  if (countEl) {
+    countEl.textContent = lastTruncated
+      ? "已显示前 " + files.length + " 项"
+      : "共 " + files.length + " 项";
+  }
+  if (lastTruncated) {
+    renderBanner(
+      "warning",
+      "文件较多，当前仅显示前 " + lastPageLimit + " 项。进入子文件夹可查看完整内容。"
+    );
+  } else if (bannerEl) {
+    bannerEl.hidden = true;
+    bannerEl.replaceChildren();
+  }
+
+  listEl.replaceChildren();
+  // 用 DocumentFragment 批量插入，避免逐行 appendChild 触发多次回流
+  const frag = document.createDocumentFragment();
+  if (dir !== "/") {
+    frag.appendChild(buildParentItem());
+  }
+
+  if (!files.length) {
+    renderStatusState({
+      icon: "folder-open",
+      title: "这里还没有文件",
+      desc: dir === "/" ? "上传文件到网盘后，就会显示在这里" : "该文件夹是空的"
+    });
+    if (frag.childNodes.length) listEl.appendChild(frag);
+    return;
+  }
+
+  for (let i = 0; i < files.length; i++) {
+    frag.appendChild(buildFileItem(files[i]));
+  }
+  listEl.appendChild(frag);
+  const readmeFile = findReadmeFile(files);
+  if (uiConfig.showReadme && readmeFile) loadReadme(readmeFile.path || "", files, dir);
 }
 
 function findReadmeFile(files) {
@@ -784,6 +983,11 @@ function findReadmeFile(files) {
 function loadReadme(path, files, dir) {
   const panel = document.getElementById("readme-panel");
   if (!panel) return;
+  // 同目录重渲染（排序切换）时直接复用，不重复请求
+  if (readmeCache && readmeCache.dir === dir && readmeCache.path === path) {
+    renderReadmePanel(readmeCache.data, files, dir);
+    return;
+  }
   apiFetch("/api/readme", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -797,41 +1001,49 @@ function loadReadme(path, files, dir) {
     })
     .then(function (data) {
       if (!data.found) return;
-      const heading = document.createElement("div");
-      heading.className = "readme-heading";
-      const readmeIcon = document.createElement("div");
-      readmeIcon.className = "readme-icon file-icon";
-      readmeIcon.appendChild(makeIcon("file-text"));
-      heading.appendChild(readmeIcon);
-      const titleWrap = document.createElement("div");
-      const title = document.createElement("h2");
-      title.id = "readme-title";
-      title.textContent = data.name || "README";
-      const source = document.createElement("p");
-      source.id = "readme-source";
-      source.textContent = "当前目录说明";
-      titleWrap.appendChild(title);
-      titleWrap.appendChild(source);
-      heading.appendChild(titleWrap);
-      const layout = document.createElement("div");
-      layout.className = "readme-layout";
-      const main = document.createElement("div");
-      main.className = "readme-main";
-      const content = document.createElement("div");
-      content.id = "readme-content";
-      renderMarkdown(content, data.content || "");
-      main.appendChild(heading);
-      main.appendChild(content);
-      layout.appendChild(main);
-      if (uiConfig.showReadmeOverview) {
-        layout.appendChild(buildReadmeOverview(files || [], dir || "/"));
-      }
-      panel.replaceChildren(layout);
-      panel.hidden = false;
+      readmeCache = { dir: dir, path: path, data: data };
+      renderReadmePanel(data, files, dir);
     })
     .catch(function (err) {
       console.warn("[网盘] README 加载失败", err);
     });
+}
+
+function renderReadmePanel(data, files, dir) {
+  const panel = document.getElementById("readme-panel");
+  if (!panel) return;
+  const heading = document.createElement("div");
+  heading.className = "readme-heading";
+  const readmeIcon = document.createElement("div");
+  readmeIcon.className = "readme-icon file-icon";
+  readmeIcon.appendChild(makeIcon("file-text"));
+  heading.appendChild(readmeIcon);
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h2");
+  title.id = "readme-title";
+  title.textContent = data.name || "README";
+  const source = document.createElement("p");
+  source.id = "readme-source";
+  source.textContent = "当前目录说明";
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(source);
+  heading.appendChild(titleWrap);
+  const layout = document.createElement("div");
+  layout.className = "readme-layout";
+  const main = document.createElement("div");
+  main.className = "readme-main";
+  const content = document.createElement("div");
+  content.id = "readme-content";
+  content.className = "md-content";
+  renderMarkdown(content, data.content || "");
+  main.appendChild(heading);
+  main.appendChild(content);
+  layout.appendChild(main);
+  if (uiConfig.showReadmeOverview) {
+    layout.appendChild(buildReadmeOverview(files || [], dir || "/"));
+  }
+  panel.replaceChildren(layout);
+  panel.hidden = false;
 }
 
 function buildReadmeOverview(files, dir) {
@@ -922,15 +1134,26 @@ function filterCurrentFiles(query) {
 }
 
 function sortFiles(files) {
+  const dirMul = sortState.dir === "desc" ? -1 : 1;
+  const key = sortState.key;
   files.sort(function (a, b) {
     const aDir = Number(a.isdir) === 1 ? 0 : 1;
     const bDir = Number(b.isdir) === 1 ? 0 : 1;
-    if (aDir !== bDir) return aDir - bDir;
-    const an = (a.server_filename || a.filename || a.path || "").toLowerCase();
-    const bn = (b.server_filename || b.filename || b.path || "").toLowerCase();
-    if (an < bn) return -1;
-    if (an > bn) return 1;
-    return 0;
+    if (aDir !== bDir) return aDir - bDir; // 文件夹恒在前
+    let cmp = 0;
+    if (key === "size") {
+      cmp = (Number(a.size) || 0) - (Number(b.size) || 0);
+    } else if (key === "time") {
+      cmp =
+        (Number(a.server_mtime || a.server_ctime) || 0) -
+        (Number(b.server_mtime || b.server_ctime) || 0);
+    } else {
+      // zh collation 让中文按拼音序，numeric 让 "2" 排在 "10" 前
+      const an = a.server_filename || a.filename || a.path || "";
+      const bn = b.server_filename || b.filename || b.path || "";
+      cmp = an.localeCompare(bn, "zh-Hans-CN", { numeric: true });
+    }
+    return cmp * dirMul;
   });
 }
 
@@ -1025,7 +1248,8 @@ function buildFileItem(file) {
     const actionsEl = document.createElement("div");
     actionsEl.className = "file-actions";
 
-    if (isPreviewableImage(fileName)) {
+    // 图片/文本/音视频均可在线预览（preview.js 按类型分发）
+    if (typeof previewKind === "function" && previewKind(fileName)) {
       const previewBtn = document.createElement("button");
       previewBtn.className = "file-action";
       previewBtn.setAttribute("type", "button");
@@ -1036,7 +1260,7 @@ function buildFileItem(file) {
       previewBtn.setAttribute("aria-label", "预览 " + fileName);
       previewBtn.addEventListener("click", function (e) {
         e.stopPropagation();
-        previewImage(filePath, fileName);
+        openPreview(filePath, fileName);
       });
       actionsEl.appendChild(previewBtn);
     }
@@ -1087,54 +1311,21 @@ function buildFileItem(file) {
   return item;
 }
 
-function previewImage(filePath, fileName) {
-  if (!filePath) {
-    showToast("文件路径无效，请刷新后重试", "warning");
-    return;
+// trapFocusWithin 把 Tab 焦点圈定在容器内（模态无障碍）。
+function trapFocusWithin(event, container) {
+  const focusables = container.querySelectorAll(
+    'button:not([hidden]):not([disabled]), input:not([hidden]):not([disabled]), select, textarea, a[href], [tabindex]:not([tabindex="-1"])'
+  );
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
-  apiFetch("/api/preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: filePath })
-  })
-    .then(function (resp) {
-      if (!resp.ok) {
-        return resp.text().then(function (text) { throw new Error(parseAPIError(resp, text)); });
-      }
-      return resp.blob();
-    })
-    .then(function (blob) {
-      const url = URL.createObjectURL(blob);
-      const image = document.getElementById("lightbox-image");
-      const caption = document.getElementById("lightbox-caption");
-      if (!image) return;
-      image.onload = function () { URL.revokeObjectURL(url); };
-      image.src = url;
-      image.alt = fileName;
-      if (caption) caption.textContent = fileName;
-      openLightbox();
-    })
-    .catch(function (err) {
-      showToast("预览失败：" + err.message, "error");
-    });
-}
-
-function openLightbox() {
-  const lightbox = document.getElementById("image-lightbox");
-  if (!lightbox) return;
-  lightbox.hidden = false;
-  lightbox.setAttribute("aria-hidden", "false");
-  document.body.classList.add("lightbox-open");
-}
-
-function closeLightbox() {
-  const lightbox = document.getElementById("image-lightbox");
-  const image = document.getElementById("lightbox-image");
-  if (!lightbox) return;
-  lightbox.hidden = true;
-  lightbox.setAttribute("aria-hidden", "true");
-  document.body.classList.remove("lightbox-open");
-  if (image) image.removeAttribute("src");
 }
 
 // ===== 文件下载 =====
@@ -1303,26 +1494,44 @@ function copyText(text) {
 
 // ===== 初始化 =====
 document.addEventListener("DOMContentLoaded", function () {
+  // 主题先于图标挂载，避免按钮图标闪烁
+  initTheme();
   // 填充静态标记中的 Lucide 图标占位符（header/按钮/登录卡/页脚/加载器）
   mountIcons(document);
 
-  const lightbox = document.getElementById("image-lightbox");
-  const lightboxClose = document.getElementById("lightbox-close");
-  if (lightboxClose) lightboxClose.addEventListener("click", closeLightbox);
-  if (lightbox) {
-    lightbox.addEventListener("click", function (event) {
-      if (event.target === lightbox) closeLightbox();
-    });
-  }
+  const searchBox = document.getElementById("file-search");
   document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") closeLightbox();
+    // "/" 聚焦搜索框（正在输入时让位）；Escape/方向键由 preview.js 处理
+    if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+    const active = document.activeElement;
+    if (active &&
+      (active.tagName === "INPUT" || active.tagName === "TEXTAREA" ||
+        active.tagName === "SELECT" || active.isContentEditable)) {
+      return;
+    }
+    const target = searchBox || document.getElementById("file-search");
+    if (target) {
+      event.preventDefault();
+      target.focus();
+      target.select();
+    }
   });
 
   // 确保登录层与表单事件就绪（兼容旧 HTML 缓存）
   ensureLoginUI();
   bindLoginForm(document.getElementById("login-form"));
+  const loginOverlay = document.getElementById("login-overlay");
+  if (loginOverlay && !loginOverlay.dataset.trapBound) {
+    loginOverlay.dataset.trapBound = "1";
+    loginOverlay.addEventListener("keydown", function (event) {
+      if (event.key === "Tab") trapFocusWithin(event, loginOverlay);
+    });
+  }
   // 动态兜底创建的登录层可能带新占位符，再挂一次（幂等）
   mountIcons(document);
+
+  const themeBtn = document.getElementById("btn-theme");
+  if (themeBtn) themeBtn.addEventListener("click", toggleTheme);
 
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {
@@ -1349,12 +1558,44 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  const searchInput = document.getElementById("file-search");
-  if (searchInput) {
-    searchInput.addEventListener("input", function () {
-      filterCurrentFiles(searchInput.value);
+  // 排序：字段下拉（自绘菜单）+ 升降序切换；只重渲染本地数据
+  loadSortState();
+  bindSortControls();
+
+  // 搜索：输入防抖 + Escape 清空
+  if (searchBox) {
+    let searchDebounce = null;
+    searchBox.addEventListener("input", function () {
+      if (searchDebounce) clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(function () {
+        searchDebounce = null;
+        filterCurrentFiles(searchBox.value);
+      }, 150);
+    });
+    searchBox.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        searchBox.value = "";
+        filterCurrentFiles("");
+        searchBox.blur();
+      }
     });
   }
+
+  // 浏览器前进/后退：还原目录并重新加载
+  window.addEventListener("popstate", function (event) {
+    const dir = (event.state && event.state.dir) || dirFromLocation() || "/";
+    setCurrentDir(dir, { mode: "none" });
+    if (!authRequired || authenticated) {
+      loadFiles(dir);
+    } else {
+      renderBreadcrumbs();
+    }
+  });
+
+  // 初始目录：优先取地址栏 ?dir=，否则用 sessionStorage 记住的目录，并回写 URL
+  const initialDir = dirFromLocation() || currentDir;
+  setCurrentDir(initialDir, { mode: "replace" });
 
   checkAuth()
     .then(function (ok) {

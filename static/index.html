@@ -40,7 +40,43 @@
     <button id="lightbox-close" class="lightbox-close" type="button" aria-label="关闭预览">
       <span data-icon="x" aria-hidden="true"></span>
     </button>
-    <img id="lightbox-image" alt="">
+    <button id="lightbox-prev" class="lightbox-nav lightbox-prev" type="button" aria-label="上一张" hidden>
+      <span data-icon="chevron-left" aria-hidden="true"></span>
+    </button>
+    <button id="lightbox-next" class="lightbox-nav lightbox-next" type="button" aria-label="下一张" hidden>
+      <span data-icon="chevron-right" aria-hidden="true"></span>
+    </button>
+    <div id="lightbox-stage">
+      <img id="lightbox-image" alt="" hidden>
+      <div id="lightbox-markdown" class="md-content" hidden></div>
+      <pre id="lightbox-text" hidden></pre>
+      <div id="lightbox-media" class="lightbox-media" hidden>
+        <div id="media-disc" class="media-disc" hidden>
+          <span class="media-disc-dot" aria-hidden="true"></span>
+          <span class="media-disc-icon" data-icon="music" aria-hidden="true"></span>
+        </div>
+        <video id="lightbox-video" playsinline hidden></video>
+        <audio id="lightbox-audio" hidden></audio>
+        <div class="media-bar">
+          <button type="button" class="media-btn" id="media-play" aria-label="播放">
+            <span class="btn-icon" data-icon="play" aria-hidden="true"></span>
+          </button>
+          <div id="media-seek" class="media-seek" aria-label="播放进度">
+            <div class="media-track">
+              <div id="media-fill" class="media-fill"></div>
+              <div id="media-thumb" class="media-thumb"></div>
+            </div>
+          </div>
+          <span id="media-time" class="media-time">0:00 / 0:00</span>
+          <button type="button" class="media-btn" id="media-mute" aria-label="静音">
+            <span class="btn-icon" data-icon="volume-2" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="media-btn" id="media-fs" aria-label="全屏" hidden>
+            <span class="btn-icon" data-icon="maximize" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </div>
     <div id="lightbox-caption"></div>
   </div>
 
@@ -54,6 +90,9 @@
         </div>
       </div>
       <div class="header-actions">
+        <button type="button" class="btn btn-ghost" id="btn-theme" aria-label="切换深色模式">
+          <span class="btn-icon" data-icon="moon" aria-hidden="true"></span>
+        </button>
         <button type="button" class="btn btn-ghost" id="btn-login-open" hidden>
           <span class="btn-icon" data-icon="log-in" aria-hidden="true"></span>
           <span class="btn-label">登录</span>
@@ -74,6 +113,21 @@
           <span data-icon="search" aria-hidden="true"></span>
           <input id="file-search" type="search" autocomplete="off" placeholder="筛选当前目录" aria-label="筛选当前目录文件">
         </label>
+        <div class="sort-group" role="group" aria-label="排序方式">
+          <button type="button" class="btn btn-ghost sort-trigger" id="btn-sort-field"
+            aria-haspopup="listbox" aria-expanded="false" aria-label="选择排序字段">
+            <span class="btn-label" id="sort-field-label">名称</span>
+            <span class="btn-icon sort-caret" data-icon="chevron-down" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="btn btn-ghost btn-sort-dir" id="btn-sort-dir" aria-label="切换升序降序">
+            <span class="btn-icon" data-icon="arrow-up" aria-hidden="true"></span>
+          </button>
+          <div class="sort-menu" id="sort-menu" role="listbox" aria-label="排序字段" hidden>
+            <button type="button" class="sort-option is-active" role="option" aria-selected="true" data-key="name">名称</button>
+            <button type="button" class="sort-option" role="option" aria-selected="false" data-key="size">大小</button>
+            <button type="button" class="sort-option" role="option" aria-selected="false" data-key="time">时间</button>
+          </div>
+        </div>
         <button class="btn btn-refresh" id="btn-refresh" type="button">
           <span class="btn-icon" data-icon="refresh-cw" aria-hidden="true"></span>
           <span class="btn-label">刷新</span>
@@ -94,7 +148,7 @@
               <p id="readme-source">README</p>
             </div>
           </div>
-          <div id="readme-content"></div>
+          <div id="readme-content" class="md-content"></div>
         </div>
         <aside id="readme-overview" class="readme-overview" aria-label="目录概览"></aside>
       </div>
@@ -122,6 +176,7 @@
   <script src="/icons.js"></script>
   <script src="/markdown.js"></script>
   <script src="/app.js"></script>
+  <script src="/preview.js"></script>
 </body>
 
 </html>
