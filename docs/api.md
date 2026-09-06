@@ -66,9 +66,37 @@ X-CSRF-Token: <csrf_token>
 说明：
 
 - 兼容 `GET /api/files?dir=/`
+- 也可用目录短链定位：`{"token": "<32位hex>"}`（与 `dir` 二选一），见 [目录短链](#目录短链)
 - 响应中的 `dlink` 会在返回前剥离
-- 自动翻页合并（每页 100，最多约 15 页）
+- 响应附带 `resolved_dir` 字段（当前列表对应的真实目录，token 请求时前端据此还原路径）
+- 自动翻页合并（每页 100，最多约 15 页，可用 `list_max_pages` 调整）
 - 若截断会带 `truncated: true`、`list_pages` 等字段
+
+## 目录短链
+
+浏览目录时前端自动把地址栏换为短链形式（`/?d=令牌`），隐藏真实路径；复制地址栏即得分享链接。也可按需创建：
+
+```http
+POST /api/dir-link
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{"dir": "/Music/Asmr"}
+```
+
+响应：
+
+```json
+{
+  "token": "9f86d081884c7d659a2feaa0c55ad015",
+  "url": "/?d=9f86d081884c7d659a2feaa0c55ad015"
+}
+```
+
+- 令牌 32 位 hex，有效期默认 7 天（`dir_link_ttl_seconds`），重启后失效
+- **隐藏的是路径，不是权限**：打开短链仍需登录，目录权限在使用时按 `allowed_paths` 重新校验
+- 文件列表接口接受 `{"token": "..."}`，响应中的 `resolved_dir` 为解析出的真实目录
+- 常见错误：`dirlink_failed`、`dirlink_not_found`（令牌过期或服务重启后失效）
 
 ### 目录 README
 
@@ -188,4 +216,4 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`readme_not_found`、`readme_link_failed`、`readme_too_large`、`readme_not_text`、`preview_not_image`、`preview_too_large`、`text_not_allowed`、`text_not_text`、`text_link_failed`、`text_fetch_failed` 等。
+常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`dirlink_not_found`、`readme_not_found`、`readme_link_failed`、`readme_too_large`、`readme_not_text`、`preview_not_image`、`preview_too_large`、`text_not_allowed`、`text_not_text`、`text_link_failed`、`text_fetch_failed` 等。

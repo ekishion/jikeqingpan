@@ -597,6 +597,127 @@ func TestImagePreviewStreamsBody(t *testing.T) {
 	}
 }
 
+func TestDirLinkStore(t *testing.T) {
+	store := newDirLinkStoreWithLimits(50*time.Millisecond, 2)
+	token, err := store.create("/共享资料")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir, ok := store.resolve(token); !ok || dir != "/共享资料" {
+		t.Fatalf("resolve failed: %q %v", dir, ok)
+	}
+	if _, ok := store.resolve("zzzz-not-hex-token!!"); ok {
+		t.Fatal("malformed token should fail")
+	}
+	// 过期后失效
+	time.Sleep(60 * time.Millisecond)
+	if _, ok := store.resolve(token); ok {
+		t.Fatal("expired dir link should fail")
+	}
+	// 容量上限：总条数不超过上限，最新条目存活
+	t1, err := store.create("/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2, err := store.create("/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t3, err := store.create("/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive := 0
+	for _, tok := range []string{t1, t2, t3} {
+		if _, ok := store.resolve(tok); ok {
+			alive++
+		}
+	}
+	if alive > 2 {
+		t.Fatalf("dir link store exceeded cap: %d", alive)
+	}
+	if _, ok := store.resolve(t3); !ok {
+		t.Fatal("newest dir link should survive eviction")
+	}
+}
+
+func TestDirLinkEndpointAndFilesByToken(t *testing.T) {
+	srv := testAuthServer(t)
+	srv.baiduBaseURL = fakeBaiduServer(t).URL
+	csrf := csrfHandshake(t, srv)
+
+	// 未登录（带合法 CSRF 但无会话）→ 401
+	req := httptest.NewRequest(http.MethodPost, "/api/dir-link", strings.NewReader(`{"dir":"/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf.Value)
+	req.AddCookie(csrf)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth dir-link want 401 got %d", rec.Code)
+	}
+
+	// 非法路径 → 400
+	if rec := postJSON(t, srv, csrf, "/api/dir-link", `{"dir":"/a/../b"}`); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "invalid_path") {
+		t.Fatalf("invalid dir want 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 正常创建 → files by token → resolved_dir 还原
+	rec = postJSON(t, srv, csrf, "/api/dir-link", `{"dir":"/共享资料"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dir-link want 200 got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var link struct {
+		Token string `json:"token"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &link); err != nil {
+		t.Fatal(err)
+	}
+	if len(link.Token) != 32 || link.URL != "/?d="+link.Token {
+		t.Fatalf("unexpected dir link payload: %+v", link)
+	}
+	rec = postJSON(t, srv, csrf, "/api/files", `{"token":"`+link.Token+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("files by token want 200 got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var files struct {
+		ResolvedDir string `json:"resolved_dir"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &files); err != nil {
+		t.Fatal(err)
+	}
+	if files.ResolvedDir != "/共享资料" {
+		t.Fatalf("resolved_dir = %q", files.ResolvedDir)
+	}
+
+	// 无效 token → 404 dirlink_not_found
+	if rec := postJSON(t, srv, csrf, "/api/files", `{"token":"ffffffffffffffffffffffffffffffff"}`); rec.Code != http.StatusNotFound ||
+		!strings.Contains(rec.Body.String(), "dirlink_not_found") {
+		t.Fatalf("invalid token want 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// allowlist 收紧后：已签发的目录短链解析出的路径不可导航 → 403
+	srv2 := testAuthServer(t)
+	srv2.cfg.AllowedPaths = []string{"/共享资料"}
+	srv2.dirLinks = newDirLinkStore(time.Hour)
+	badToken, err := srv2.dirLinks.create("/私人文件")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrf2 := csrfHandshake(t, srv2)
+	if rec := postJSON(t, srv2, csrf2, "/api/files", `{"token":"`+badToken+`"}`); rec.Code != http.StatusForbidden ||
+		!strings.Contains(rec.Body.String(), "path_not_allowed") {
+		t.Fatalf("unallowed token dir want 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// 创建指向越界目录的短链 → 403
+	if rec := postJSON(t, srv2, csrf2, "/api/dir-link", `{"dir":"/私人文件"}`); rec.Code != http.StatusForbidden ||
+		!strings.Contains(rec.Body.String(), "path_not_allowed") {
+		t.Fatalf("dir-link for unallowed dir want 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestTunableConfigDefaultsAndOverrides(t *testing.T) {
 	cfg := &Config{BaiduCookie: "c"}
 	if err := cfg.normalizeAndValidate(); err != nil {

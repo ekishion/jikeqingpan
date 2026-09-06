@@ -40,6 +40,10 @@ type Config struct {
 	// ShortLinkMaxUses 短链最大使用次数；0 表示不限制。
 	ShortLinkMaxUses int `json:"short_link_max_uses"`
 
+	// DirLinkTTLSeconds 目录短链有效期，默认 7 天。目录短链用于地址栏
+	// 分享/书签（?d=令牌），重启后失效（内存模型）。
+	DirLinkTTLSeconds int `json:"dir_link_ttl_seconds"`
+
 	// SessionTTLSeconds 百度 uk/sk 会话缓存有效期，默认 3600。
 	SessionTTLSeconds  int      `json:"session_ttl_seconds"`
 	TrustedProxyIPs    []string `json:"trusted_proxy_ips"`
@@ -73,6 +77,14 @@ func (c *Config) shortLinkTTL() time.Duration {
 		return time.Hour
 	}
 	return time.Duration(c.ShortLinkTTLSeconds) * time.Second
+}
+
+// dirLinkTTL 目录短链有效期，默认 7 天。
+func (c *Config) dirLinkTTL() time.Duration {
+	if c.DirLinkTTLSeconds <= 0 {
+		return 7 * 24 * time.Hour
+	}
+	return time.Duration(c.DirLinkTTLSeconds) * time.Second
 }
 
 func (c *Config) sessionTTL() time.Duration {
@@ -198,6 +210,9 @@ func applyEnvOverrides(c *Config) {
 	if n, ok := envInt("SHORT_LINK_MAX_USES"); ok {
 		c.ShortLinkMaxUses = n
 	}
+	if n, ok := envInt("DIR_LINK_TTL_SECONDS"); ok {
+		c.DirLinkTTLSeconds = n
+	}
 	if n, ok := envInt("SESSION_TTL_SECONDS"); ok {
 		c.SessionTTLSeconds = n
 	}
@@ -276,6 +291,9 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	if c.ShortLinkTTLSeconds < 0 {
 		return fmt.Errorf("short_link_ttl_seconds 不能为负数")
+	}
+	if c.DirLinkTTLSeconds < 0 {
+		return fmt.Errorf("dir_link_ttl_seconds 不能为负数")
 	}
 	if c.ShortLinkMaxUses < 0 {
 		return fmt.Errorf("short_link_max_uses 不能为负数")

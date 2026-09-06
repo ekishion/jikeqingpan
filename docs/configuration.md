@@ -35,8 +35,9 @@ openssl rand -hex 24
 | `force_secure_cookie` | `FORCE_SECURE_COOKIE` | `false` | 强制 Cookie `Secure`（HTTPS 反代时建议 true） |
 | `rate_limit_per_second` | `RATE_LIMIT_PER_SECOND` | `10` | 每 IP 每秒限流 |
 | `baidu_app_id` | `BAIDU_APP_ID` | `250528` | 百度 App ID |
-| `short_link_ttl_seconds` | `SHORT_LINK_TTL_SECONDS` | `3600` | 短链有效期（秒） |
-| `short_link_max_uses` | `SHORT_LINK_MAX_USES` | `0` | 短链最大使用次数；`0` 不限制 |
+| `short_link_ttl_seconds` | `SHORT_LINK_TTL_SECONDS` | `3600` | 下载短链有效期（秒） |
+| `short_link_max_uses` | `SHORT_LINK_MAX_USES` | `0` | 下载短链最大使用次数；`0` 不限制 |
+| `dir_link_ttl_seconds` | `DIR_LINK_TTL_SECONDS` | `604800` | 目录短链有效期（秒，地址栏 `?d=` 令牌），默认 7 天；重启后失效 |
 | `session_ttl_seconds` | `SESSION_TTL_SECONDS` | `3600` | 百度 uk/sk 缓存（秒） |
 | `trusted_proxy_ips` | `TRUSTED_PROXY_IPS` | 空 | 允许读取 `X-Forwarded-For` 的反代 IP 或 CIDR；仅填写实际反代来源 |
 | `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化，父目录不存在时会自动创建 |

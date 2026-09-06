@@ -18,6 +18,7 @@ type Server struct {
 	baiduBaseURL string
 	httpClient   *http.Client
 	shortLinks   *shortLinkStore
+	dirLinks     *dirLinkStore
 	cache        *fileListCache
 	staticRoot   fs.FS
 	sessions     *sessionManager
@@ -46,6 +47,7 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		baiduBaseURL: "https://pan.baidu.com",
 		httpClient:   &http.Client{Timeout: 15 * time.Second},
 		shortLinks:   newShortLinkStore(cfg.shortLinkTTL(), cfg.ShortLinkMaxUses),
+		dirLinks:     newDirLinkStore(cfg.dirLinkTTL()),
 		cache:        newFileListCacheWithLimits(maxCachedFiles, cfg.fileCacheTTL(), cfg.dlinkCacheTTL()),
 		auditMax:     defaultAuditMaxBytes,
 		staticRoot:   sub,
@@ -91,6 +93,12 @@ func (s *Server) routes() {
 		csrf:        true, // POST 校验；GET 跳过
 		rateLimit:   true,
 		methods:     []string{http.MethodGet, http.MethodPost},
+	}))
+	s.mux.HandleFunc("/api/dir-link", s.withSecurity(s.handleDirLink, securityOpts{
+		requireAuth: true,
+		csrf:        true,
+		rateLimit:   true,
+		methods:     []string{http.MethodPost},
 	}))
 	s.mux.HandleFunc("/api/readme", s.withSecurity(s.handleReadme, securityOpts{
 		requireAuth: true,

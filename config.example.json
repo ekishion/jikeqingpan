@@ -10,6 +10,7 @@
   "baidu_app_id": "250528",
   "short_link_ttl_seconds": 3600,
   "short_link_max_uses": 0,
+  "dir_link_ttl_seconds": 604800,
   "session_ttl_seconds": 3600,
   "trusted_proxy_ips": ["127.0.0.1", "::1"],
   "audit_log_path": "./data/download-audit.jsonl",

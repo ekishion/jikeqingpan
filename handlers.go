@@ -84,21 +84,33 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleFiles 获取文件列表，代理百度网盘 list API
+// handleFiles 获取文件列表，代理百度网盘 list API。
+// 支持两种定位方式：{dir} 明文路径，或 {token} 目录短链（服务端解析）。
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	var dir string
+	var dir, token string
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
 		var request struct {
-			Dir string `json:"dir"`
+			Dir   string `json:"dir"`
+			Token string `json:"token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
 			return
 		}
 		dir = request.Dir
+		token = request.Token
 	} else {
 		dir = r.URL.Query().Get("dir")
+		token = r.URL.Query().Get("token")
+	}
+	if token != "" {
+		resolved, ok := s.dirLinks.resolve(token)
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "dirlink_not_found", "目录链接已失效，请从首页重新进入")
+			return
+		}
+		dir = resolved
 	}
 	if dir == "" {
 		dir = "/"
@@ -136,8 +148,65 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	publicBody, err = injectResolvedDir(publicBody, dir)
+	if err != nil {
+		log.Printf("[ERROR] 注入目录信息失败: %v", err)
+		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(publicBody)
+}
+
+// injectResolvedDir 在列表响应中带上当前目录：用 token 请求时前端据此还原路径。
+func injectResolvedDir(body []byte, dir string) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(dir)
+	if err != nil {
+		return nil, err
+	}
+	response["resolved_dir"] = raw
+	return json.Marshal(response)
+}
+
+// handleDirLink 为目录生成地址栏短链（/?d=令牌），隐藏真实路径。
+// 令牌仅隐藏路径：使用时仍需登录，且权限由 /api/files 重新校验。
+func (s *Server) handleDirLink(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var request struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
+		return
+	}
+	dir := request.Dir
+	if dir == "" {
+		dir = "/"
+	}
+	if !isValidBaiduPath(dir) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "目录路径无效")
+		return
+	}
+	if !s.pathNavigable(dir) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该目录不在共享范围内")
+		return
+	}
+	token, err := s.dirLinks.create(dir)
+	if err != nil {
+		log.Printf("[ERROR] 创建目录短链失败: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "dirlink_failed", "生成目录链接失败，请重试")
+		return
+	}
+	s.audit(r, "dirlink_issued", dir)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"token": token,
+		"url":   "/?d=" + token,
+	})
 }
 
 // handleReadme 读取当前目录中的 README 文件，并返回给前端安全渲染。

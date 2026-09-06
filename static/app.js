@@ -4,9 +4,19 @@
 
 // ===== 全局状态 =====
 const DIR_STORAGE_KEY = "jikeqingpan_current_dir";
+const DIR_TOKEN_STORAGE_KEY = "jikeqingpan_dir_tokens";
 const SORT_STORAGE_KEY = "jikeqingpan_sort";
 const THEME_STORAGE_KEY = "jikeqingpan_theme";
 let currentDir = sessionStorage.getItem(DIR_STORAGE_KEY) || "/";
+// 目录 -> 短链令牌缓存：进过的目录不重复建链（sessionStorage 随标签页存活）
+let dirTokenCache = (function () {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(DIR_TOKEN_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+})();
 let authRequired = false;
 let authenticated = false;
 let toastContainer = null;
@@ -324,18 +334,85 @@ function setCurrentDir(dir, opts) {
   syncUrlDir(currentDir, opts);
 }
 
-// syncUrlDir 把当前目录同步到地址栏（?dir=...），支持浏览器前进/后退。
-// mode: "push"（默认，用户主动进入目录）| "replace"（初始加载）| "none"（popstate 还原）。
+// syncUrlDir 把当前目录同步到地址栏。mode:
+//   "push"（默认，用户主动进入目录）—— 短链优先：异步取令牌后地址栏变为 ?d=令牌，
+//     取令牌失败（限流等）兜底回 ?dir= 明文形式，不影响浏览；
+//   "replace"（初始加载）—— 已是 ?d= 短链时保持原样，否则写 ?dir=；
+//   "none"（popstate 还原）—— 不动地址栏。
 function syncUrlDir(dir, opts) {
   const mode = opts && opts.mode ? opts.mode : "push";
   if (mode === "none" || !window.history || !window.history.pushState) return;
-  const url = dir === "/" ? location.pathname : location.pathname + "?dir=" + encodeURIComponent(dir);
+  if (mode === "push") {
+    pushShortDirUrl(dir);
+    return;
+  }
   try {
+    const token = new URLSearchParams(window.location.search).get("d");
+    const url = token
+      ? location.pathname + "?d=" + token
+      : (dir === "/" ? location.pathname : location.pathname + "?dir=" + encodeURIComponent(dir));
     if (mode === "replace") history.replaceState({ dir: dir }, "", url);
-    else history.pushState({ dir: dir }, "", url);
   } catch (e) {
     /* file:// 等环境不支持，忽略 */
   }
+}
+
+// pushShortDirUrl 异步换取目录令牌并把地址栏推为短链形式。
+function pushShortDirUrl(dir) {
+  if (dir === "/") {
+    try {
+      history.pushState({ dir: dir }, "", location.pathname);
+    } catch (e) { /* ignore */ }
+    return;
+  }
+  getDirToken(dir)
+    .then(function (token) {
+      if (currentDir !== dir) return; // 用户已导航走，丢弃过期结果
+      try {
+        history.pushState({ dir: dir }, "", location.pathname + "?d=" + token);
+      } catch (e) { /* ignore */ }
+    })
+    .catch(function () {
+      if (currentDir !== dir) return;
+      try {
+        history.pushState({ dir: dir }, "", location.pathname + "?dir=" + encodeURIComponent(dir));
+      } catch (e) { /* ignore */ }
+    });
+}
+
+function rememberDirToken(dir, token) {
+  dirTokenCache[dir] = token;
+  const keys = Object.keys(dirTokenCache);
+  // 只保留最近 200 条，防止极端使用下无限膨胀
+  for (let i = 0; i < keys.length - 200; i++) {
+    delete dirTokenCache[keys[i]];
+  }
+  try {
+    sessionStorage.setItem(DIR_TOKEN_STORAGE_KEY, JSON.stringify(dirTokenCache));
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function getDirToken(dir) {
+  const hit = dirTokenCache[dir];
+  if (hit) return Promise.resolve(hit);
+  return apiFetch("/api/dir-link", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir: dir })
+  })
+    .then(function (resp) {
+      return resp.text().then(function (text) {
+        if (!resp.ok) throw new Error(parseAPIError(resp, text));
+        return JSON.parse(text);
+      });
+    })
+    .then(function (data) {
+      if (!data.token) throw new Error("未能生成目录链接");
+      rememberDirToken(dir, data.token);
+      return data.token;
+    });
 }
 
 function dirFromLocation() {
@@ -343,6 +420,17 @@ function dirFromLocation() {
     const dir = new URLSearchParams(window.location.search).get("dir");
     // 只接受形如 /xxx 的路径，且拒绝包含 .. 的可疑值
     if (dir && dir.charAt(0) === "/" && dir.indexOf("..") === -1) return dir;
+  } catch (e) {
+    /* ignore */
+  }
+  return null;
+}
+
+// dirTokenFromLocation 识别地址栏中的目录短链 ?d=<32位hex>。
+function dirTokenFromLocation() {
+  try {
+    const t = new URLSearchParams(window.location.search).get("d");
+    if (t && /^[a-f0-9]{32}$/.test(t)) return t;
   } catch (e) {
     /* ignore */
   }
@@ -827,8 +915,11 @@ function enterDir(dir) {
 
 // ===== 文件列表加载 =====
 
-function loadFiles(dir) {
-  const targetDir = dir || currentDir;
+// loadFiles 拉取目录列表。opts.token 传目录短链令牌时按令牌请求，
+// 并用响应中的 resolved_dir 还原本地目录状态。
+function loadFiles(dir, opts) {
+  opts = opts || {};
+  let targetDir = dir || currentDir;
   const listEl = document.getElementById("file-list");
   const statusEl = document.getElementById("status");
   const countEl = document.getElementById("file-count");
@@ -862,10 +953,11 @@ function loadFiles(dir) {
   if (refreshBtn) refreshBtn.disabled = true;
   if (countEl) countEl.textContent = "加载中…";
 
+  const requestBody = opts.token ? { token: opts.token } : { dir: targetDir };
   return apiFetch("/api/files", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dir: targetDir })
+    body: JSON.stringify(requestBody)
   })
     .then(function (resp) {
       return resp.text().then(function (text) {
@@ -890,6 +982,17 @@ function loadFiles(dir) {
         throw new Error("网盘服务返回异常，请稍后重试");
       }
 
+      if (opts.token) {
+        const resolvedDir = data.resolved_dir || targetDir;
+        rememberDirToken(resolvedDir, opts.token);
+        if (resolvedDir !== targetDir) {
+          // 短链解析出的真实目录（replace 保持 ?d= 不变）
+          setCurrentDir(resolvedDir, { mode: "replace" });
+          renderBreadcrumbs();
+        }
+        targetDir = resolvedDir;
+      }
+
       currentFiles = Array.isArray(data.list) ? data.list : [];
       lastTruncated = !!data.truncated;
       lastPageLimit = data.list_page_limit || 1500;
@@ -899,6 +1002,16 @@ function loadFiles(dir) {
       if (refreshBtn) refreshBtn.disabled = false;
       // 未登录已由 requireLogin 接管界面，避免再盖一层错误态
       if (authRequired && !authenticated) return;
+      if (opts.token) {
+        // 目录短链失效（如服务重启）：明确提示后回退根目录
+        console.warn("[网盘] 目录短链失效", err);
+        showToast("目录链接已失效，已回到根目录", "warning");
+        setCurrentDir("/", { mode: "replace" });
+        try {
+          history.replaceState({ dir: "/" }, "", location.pathname);
+        } catch (e) { /* ignore */ }
+        return loadFiles("/");
+      }
       renderStatusState({
         tone: "error",
         icon: "circle-alert",
@@ -1593,14 +1706,18 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   });
 
-  // 初始目录：优先取地址栏 ?dir=，否则用 sessionStorage 记住的目录，并回写 URL
-  const initialDir = dirFromLocation() || currentDir;
-  setCurrentDir(initialDir, { mode: "replace" });
+  // 初始目录：优先 ?d= 短链，其次 ?dir= 明文，最后 sessionStorage 记住的目录
+  const urlDirToken = dirTokenFromLocation();
+  if (!urlDirToken) {
+    const initialDir = dirFromLocation() || currentDir;
+    setCurrentDir(initialDir, { mode: "replace" });
+  }
 
   checkAuth()
     .then(function (ok) {
-      if (ok) return loadFiles(currentDir);
-      // 未登录：只弹窗，不偷偷拉列表
+      if (!ok) return; // 未登录：只弹窗，不偷偷拉列表
+      if (urlDirToken) return loadFiles("", { token: urlDirToken });
+      return loadFiles(currentDir);
     })
     .catch(function (err) {
       console.warn("[鉴权] 初始化失败", err);
