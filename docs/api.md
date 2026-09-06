@@ -131,15 +131,50 @@ X-CSRF-Token: <csrf_token>
 ```
 
 - 仅允许图片 MIME 类型；服务端同时结合文件内容和扩展名识别类型
-- 单张图片最大 16 MB
+- 单张图片默认最大 16 MB（`preview_max_bytes` 可调）
 - 预览内容会经过 VPS，因此会产生 VPS 出站流量；普通下载仍使用百度直链重定向
 - 常见错误：`preview_link_failed`、`preview_fetch_failed`、`preview_not_image`、`preview_too_large`
+
+### 文本预览
+
+文本/代码文件在灯箱中查看：
+
+```http
+POST /api/text
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{"path": "/代码目录/main.go"}
+```
+
+- 仅接受扩展名白名单：`txt` `md` `markdown` `json` `xml` `yaml` `yml` `csv` `log` `ini` `conf` `sh` `bat` `ps1` `py` `js` `ts` `go` `c` `h` `cpp` `hpp` `java` `rs` `sql` `toml` `html` `css`
+- 内容上限 512 KB；超出后按 UTF-8 字符边界截断并返回 `truncated: true`
+- 非 UTF-8（二进制）内容返回 `415 text_not_text`
+- 响应示例：
+
+```json
+{
+  "found": true,
+  "name": "main.go",
+  "content": "package main\n...",
+  "truncated": false
+}
+```
+
+- 常见错误：`text_not_allowed`、`text_not_text`、`text_link_failed`、`text_fetch_failed`
+
+### 音视频播放
+
+`<video>` / `<audio>` 直接复用下载短链：前端先 `POST /api/download` 拿到 `/d/{token}`，再把短链作为媒体 `src`。服务端 302 到百度直链，浏览器自动透传 `Range` 头，支持拖动进度条。
+
+- 媒体流量**不经过 VPS 中转**（浏览器直连百度直链；CSP `media-src` 已放行相应域名）
+- 注意：若配置了 `short_link_max_uses`，拖动进度条产生的多次请求可能重复消耗短链使用次数；需要媒体播放时建议保持默认（不限次数）
 
 ## 健康检查
 
 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /healthz` | 否 | 进程存活 |
+| `GET /healthz` | 否 | 进程存活（同时支持 `HEAD`） |
 | `GET /readyz` | 是（若启用 access_token） | 探测百度 Session |
 
 ## 错误响应格式
@@ -153,4 +188,4 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`readme_not_found`、`readme_link_failed`、`readme_too_large`、`readme_not_text`、`preview_not_image`、`preview_too_large` 等。
+常见 code：`unauthorized`、`csrf_invalid`、`invalid_path`、`path_not_allowed`、`rate_limited`、`baidu_list_failed`、`dlink_failed`、`shortlink_not_found`、`readme_not_found`、`readme_link_failed`、`readme_too_large`、`readme_not_text`、`preview_not_image`、`preview_too_large`、`text_not_allowed`、`text_not_text`、`text_link_failed`、`text_fetch_failed` 等。

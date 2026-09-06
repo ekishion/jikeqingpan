@@ -43,6 +43,11 @@ openssl rand -hex 24
 | `allowed_paths` | `ALLOWED_PATHS` | 空 | 共享目录白名单；配置后仅允许这些目录及其子目录访问，多个环境变量路径用英文逗号分隔 |
 | `show_readme` | `SHOW_README` | `true` | 是否在目录顶部展示网盘中的 README |
 | `show_readme_overview` | `SHOW_README_OVERVIEW` | `true` | 是否在 README 右侧展示目录概览 |
+| `list_max_pages` | `LIST_MAX_PAGES` | `15` | 目录列表自动翻页上限（每页 100 项，15 页即 1500 项） |
+| `preview_max_bytes` | `PREVIEW_MAX_BYTES` | `16777216` | 图片预览大小上限（字节），默认 16 MB |
+| `readme_max_bytes` | `README_MAX_BYTES` | `524288` | README 内容大小上限（字节），默认 512 KB |
+| `file_cache_ttl_seconds` | `FILE_CACHE_TTL_SECONDS` | `900` | 文件元数据缓存有效期（秒） |
+| `dlink_cache_ttl_seconds` | `DLINK_CACHE_TTL_SECONDS` | `300` | 下载直链缓存有效期（秒） |
 | — | `CONFIG_PATH` | `config.json` / 容器内 `/data/config.json` | 配置文件路径 |
 | — | `TZ` | — | 时区（Docker 默认 `Asia/Shanghai`） |
 

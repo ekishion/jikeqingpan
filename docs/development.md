@@ -10,18 +10,22 @@
 ├── handlers.go          # HTTP 处理器
 ├── baidu.go             # 百度青春版 API、签名与直链
 ├── cache.go             # 文件元数据 / dlink 缓存
+├── evict.go             # 缓存/短链/限流共用的采样淘汰
 ├── shortlink.go         # 下载短链存储
 ├── pathsec.go           # 路径与下载域名校验
 ├── ratelimit.go         # 按 IP 限流
-├── httputil.go          # Cookie / CSRF / 访问校验辅助
+├── httputil.go          # Cookie / CSRF / 访问校验 / 客户端 IP 辅助
 ├── session.go           # HMAC 签名登录会话（签发与校验）
 ├── loginguard.go        # 登录失败按 IP 指数退避锁定
 ├── security_test.go     # 安全相关单测
 ├── auth_test.go         # 登录 / 会话 / 防爆破单测
-├── static/              # 前端（go:embed，markdown.js 负责 README 安全渲染）
+├── static/              # 前端（go:embed）
 │   ├── index.html       # 页面结构
-│   ├── app.css          # 样式（纯白极简 · 深色跟随系统）
-│   └── app.js           # 逻辑 + 内联 Lucide 图标
+│   ├── app.css          # 样式（纯白极简 · 深色跟随系统/可手动切换）
+│   ├── app.js           # 主逻辑（浏览、鉴权、搜索、排序）
+│   ├── preview.js       # 预览灯箱（图片/文本/音视频）
+│   ├── icons.js         # 内联 Lucide SVG 图标模块
+│   └── markdown.js      # README 安全渲染（纯 DOM，不用 innerHTML）
 ├── docs/                # 文档
 ├── config.example.json  # 配置模板 → 复制为 config.json
 ├── Dockerfile
