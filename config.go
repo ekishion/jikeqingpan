@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -46,6 +47,17 @@ type Config struct {
 	AllowedPaths       []string `json:"allowed_paths"`
 	ShowReadme         *bool    `json:"show_readme"`
 	ShowReadmeOverview *bool    `json:"show_readme_overview"`
+
+	// ListMaxPages 目录列表自动翻页上限；0 表示默认 15 页（每页 100 项）。
+	ListMaxPages int `json:"list_max_pages"`
+	// PreviewMaxBytes 图片预览大小上限；0 表示默认 16 MB。
+	PreviewMaxBytes int `json:"preview_max_bytes"`
+	// ReadmeMaxBytes README 内容大小上限；0 表示默认 512 KB。
+	ReadmeMaxBytes int `json:"readme_max_bytes"`
+	// FileCacheTTLSeconds 文件元数据缓存有效期；0 表示默认 15 分钟。
+	FileCacheTTLSeconds int `json:"file_cache_ttl_seconds"`
+	// DlinkCacheTTLSeconds 下载直链缓存有效期；0 表示默认 5 分钟。
+	DlinkCacheTTLSeconds int `json:"dlink_cache_ttl_seconds"`
 }
 
 func (c *Config) showReadme() bool {
@@ -76,6 +88,46 @@ func (c *Config) authSessionTTL() time.Duration {
 		return 7 * 24 * time.Hour
 	}
 	return time.Duration(c.AuthSessionTTLSeconds) * time.Second
+}
+
+// listMaxPages 目录列表自动翻页上限，默认 15 页（每页 100，即 1500 项）。
+func (c *Config) listMaxPages() int {
+	if c.ListMaxPages > 0 {
+		return c.ListMaxPages
+	}
+	return 15
+}
+
+// previewMaxBytes 图片预览大小上限，默认 16 MB。
+func (c *Config) previewMaxBytes() int {
+	if c.PreviewMaxBytes > 0 {
+		return c.PreviewMaxBytes
+	}
+	return 16 * 1024 * 1024
+}
+
+// readmeMaxBytes README 内容大小上限，默认 512 KB。
+func (c *Config) readmeMaxBytes() int {
+	if c.ReadmeMaxBytes > 0 {
+		return c.ReadmeMaxBytes
+	}
+	return 512 * 1024
+}
+
+// fileCacheTTL 文件元数据缓存有效期，默认 15 分钟。
+func (c *Config) fileCacheTTL() time.Duration {
+	if c.FileCacheTTLSeconds > 0 {
+		return time.Duration(c.FileCacheTTLSeconds) * time.Second
+	}
+	return 15 * time.Minute
+}
+
+// dlinkCacheTTL 下载直链缓存有效期，默认 5 分钟。
+func (c *Config) dlinkCacheTTL() time.Duration {
+	if c.DlinkCacheTTLSeconds > 0 {
+		return time.Duration(c.DlinkCacheTTLSeconds) * time.Second
+	}
+	return 5 * time.Minute
 }
 
 // sessionSigningKey 派生会话签名密钥：优先用显式 SessionSecret，
@@ -166,6 +218,21 @@ func applyEnvOverrides(c *Config) {
 		value := parseBoolEnv(v)
 		c.ShowReadmeOverview = &value
 	}
+	if n, ok := envInt("LIST_MAX_PAGES"); ok {
+		c.ListMaxPages = n
+	}
+	if n, ok := envInt("PREVIEW_MAX_BYTES"); ok {
+		c.PreviewMaxBytes = n
+	}
+	if n, ok := envInt("README_MAX_BYTES"); ok {
+		c.ReadmeMaxBytes = n
+	}
+	if n, ok := envInt("FILE_CACHE_TTL_SECONDS"); ok {
+		c.FileCacheTTLSeconds = n
+	}
+	if n, ok := envInt("DLINK_CACHE_TTL_SECONDS"); ok {
+		c.DlinkCacheTTLSeconds = n
+	}
 }
 
 func envInt(key string) (int, bool) {
@@ -175,6 +242,7 @@ func envInt(key string) (int, bool) {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		log.Printf("[WARN] 环境变量 %s 不是有效整数: %q，已忽略", key, v)
 		return 0, false
 	}
 	return n, true
@@ -217,6 +285,21 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	if c.AuthSessionTTLSeconds < 0 {
 		return fmt.Errorf("auth_session_ttl_seconds 不能为负数")
+	}
+	if c.ListMaxPages != 0 && (c.ListMaxPages < 1 || c.ListMaxPages > 100) {
+		return fmt.Errorf("list_max_pages 必须在 1 到 100 之间")
+	}
+	if c.PreviewMaxBytes < 0 {
+		return fmt.Errorf("preview_max_bytes 不能为负数")
+	}
+	if c.ReadmeMaxBytes < 0 {
+		return fmt.Errorf("readme_max_bytes 不能为负数")
+	}
+	if c.FileCacheTTLSeconds < 0 {
+		return fmt.Errorf("file_cache_ttl_seconds 不能为负数")
+	}
+	if c.DlinkCacheTTLSeconds < 0 {
+		return fmt.Errorf("dlink_cache_ttl_seconds 不能为负数")
 	}
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
 	c.SessionSecret = strings.TrimSpace(c.SessionSecret)

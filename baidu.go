@@ -17,8 +17,8 @@ import (
 
 const (
 	fileListPageSize = 100
-	// 单次列表请求的翻页上限。需与 WriteTimeout、百度客户端超时一起估算最坏耗时。
-	fileListMaxPages = 15
+	// 默认的单次列表请求翻页上限，可用 list_max_pages 配置。
+	defaultFileListMaxPages = 15
 )
 
 // listFetchResult 目录列表拉取结果（含截断信息）
@@ -34,6 +34,10 @@ func (s *Server) fetchFileList(dir string) (*listFetchResult, error) {
 	if dir == "" {
 		dir = "/"
 	}
+	maxPages := defaultFileListMaxPages
+	if s.cfg != nil && s.cfg.listMaxPages() > 0 {
+		maxPages = s.cfg.listMaxPages()
+	}
 
 	var (
 		mergedList []json.RawMessage
@@ -42,7 +46,7 @@ func (s *Server) fetchFileList(dir string) (*listFetchResult, error) {
 		pages      int
 	)
 
-	for page := 1; page <= fileListMaxPages; page++ {
+	for page := 1; page <= maxPages; page++ {
 		apiURL := fmt.Sprintf(
 			s.baiduBaseURL+"/youth/api/list?clienttype=0&app_id=%s&web=1&order=time&desc=1&num=%d&page=%d&dlink=1&dir=%s",
 			url.QueryEscape(s.cfg.BaiduAppID),
@@ -90,9 +94,9 @@ func (s *Server) fetchFileList(dir string) (*listFetchResult, error) {
 		if len(pageList) < fileListPageSize {
 			break
 		}
-		if page == fileListMaxPages {
+		if page == maxPages {
 			truncated = true
-			log.Printf("[WARN] 目录 %q 达到翻页上限 %d 页（每页 %d），可能仍有未加载文件", dir, fileListMaxPages, fileListPageSize)
+			log.Printf("[WARN] 目录 %q 达到翻页上限 %d 页（每页 %d），可能仍有未加载文件", dir, maxPages, fileListPageSize)
 		}
 	}
 
@@ -108,7 +112,7 @@ func (s *Server) fetchFileList(dir string) (*listFetchResult, error) {
 	baseResp["truncated"] = json.RawMessage(strconv.FormatBool(truncated))
 	baseResp["list_pages"] = json.RawMessage(strconv.Itoa(pages))
 	baseResp["list_items"] = json.RawMessage(strconv.Itoa(len(mergedList)))
-	baseResp["list_page_limit"] = json.RawMessage(strconv.Itoa(fileListMaxPages * fileListPageSize))
+	baseResp["list_page_limit"] = json.RawMessage(strconv.Itoa(maxPages * fileListPageSize))
 
 	out, err := json.Marshal(baseResp)
 	if err != nil {

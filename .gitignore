@@ -7,3 +7,6 @@ cmd/bin/
 .env
 .env.*
 !.env.example
+# 运行时数据（审计日志等）
+data/
+.zcode/

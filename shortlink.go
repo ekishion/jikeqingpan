@@ -62,18 +62,12 @@ func (s *shortLinkStore) create(filePath string) (string, error) {
 		}
 	}
 	for len(s.links) >= s.maxEntries {
-		var oldestToken string
-		var oldest time.Time
-		for token, link := range s.links {
-			if oldestToken == "" || link.createdAt.Before(oldest) {
-				oldestToken = token
-				oldest = link.createdAt
-			}
-		}
-		if oldestToken == "" {
+		evicted := evictOldestSampled(s.links, func(link shortLink) time.Time {
+			return link.createdAt
+		}, evictionSampleSize)
+		if !evicted {
 			break
 		}
-		delete(s.links, oldestToken)
 	}
 
 	for i := 0; i < 3; i++ {

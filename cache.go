@@ -26,6 +26,7 @@ type fileListCache struct {
 	updatedAt   time.Time
 	maxEntries  int
 	ttl         time.Duration
+	dlinkTTL    time.Duration
 }
 
 const cachedDLinkTTL = 5 * time.Minute
@@ -33,20 +34,24 @@ const fileMetaTTL = 15 * time.Minute
 const maxCachedFiles = 10000
 
 func newFileListCache() *fileListCache {
-	return newFileListCacheWithLimits(maxCachedFiles, fileMetaTTL)
+	return newFileListCacheWithLimits(maxCachedFiles, fileMetaTTL, cachedDLinkTTL)
 }
 
-func newFileListCacheWithLimits(maxEntries int, ttl time.Duration) *fileListCache {
+func newFileListCacheWithLimits(maxEntries int, ttl, dlinkTTL time.Duration) *fileListCache {
 	if maxEntries < 1 {
 		maxEntries = maxCachedFiles
 	}
 	if ttl <= 0 {
 		ttl = fileMetaTTL
 	}
+	if dlinkTTL <= 0 {
+		dlinkTTL = cachedDLinkTTL
+	}
 	return &fileListCache{
 		filesByPath: make(map[string]fileMeta),
 		maxEntries:  maxEntries,
 		ttl:         ttl,
+		dlinkTTL:    dlinkTTL,
 	}
 }
 
@@ -130,7 +135,7 @@ func (c *fileListCache) getCachedDLink(filePath, ua string) (string, bool) {
 	}
 	ua = normalizeDownloadUA(ua)
 	if !ok || meta.DLink == "" || meta.DLinkUA == "" || meta.DLinkUA != ua ||
-		meta.DLinkCachedAt.IsZero() || time.Since(meta.DLinkCachedAt) >= cachedDLinkTTL {
+		meta.DLinkCachedAt.IsZero() || time.Since(meta.DLinkCachedAt) >= c.dlinkTTL {
 		return "", false
 	}
 	meta.LastAccessAt = time.Now()
@@ -162,21 +167,14 @@ func (c *fileListCache) cleanupExpiredLocked(now time.Time) {
 
 func (c *fileListCache) enforceLimitLocked() {
 	for len(c.filesByPath) > c.maxEntries {
-		var oldestPath string
-		var oldest time.Time
-		for filePath, meta := range c.filesByPath {
-			lastAccess := meta.LastAccessAt
-			if lastAccess.IsZero() {
-				lastAccess = meta.CachedAt
+		evicted := evictOldestSampled(c.filesByPath, func(meta fileMeta) time.Time {
+			if meta.LastAccessAt.IsZero() {
+				return meta.CachedAt
 			}
-			if oldestPath == "" || lastAccess.Before(oldest) {
-				oldestPath = filePath
-				oldest = lastAccess
-			}
-		}
-		if oldestPath == "" {
+			return meta.LastAccessAt
+		}, evictionSampleSize)
+		if !evicted {
 			return
 		}
-		delete(c.filesByPath, oldestPath)
 	}
 }

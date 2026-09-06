@@ -50,17 +50,9 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	}
 	if !ok {
 		if len(rl.clients) >= maxRateLimiterClients {
-			var oldestIP string
-			var oldest time.Time
-			for clientIP, state := range rl.clients {
-				if oldestIP == "" || state.lastSeen.Before(oldest) {
-					oldestIP = clientIP
-					oldest = state.lastSeen
-				}
-			}
-			if oldestIP != "" {
-				delete(rl.clients, oldestIP)
-			}
+			evictOldestSampled(rl.clients, func(state *clientState) time.Time {
+				return state.lastSeen
+			}, evictionSampleSize)
 		}
 		rl.clients[ip] = &clientState{tokens: rl.rate - 1, lastSeen: now}
 		return true

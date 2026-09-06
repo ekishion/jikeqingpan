@@ -109,15 +109,7 @@ func (g *loginGuard) cleanupLocked(now time.Time) {
 }
 
 func (g *loginGuard) evictOldestLocked() {
-	var oldestIP string
-	var oldest time.Time
-	for ip, e := range g.entries {
-		if oldestIP == "" || e.lastSeen.Before(oldest) {
-			oldestIP = ip
-			oldest = e.lastSeen
-		}
-	}
-	if oldestIP != "" {
-		delete(g.entries, oldestIP)
-	}
+	evictOldestSampled(g.entries, func(e *loginAttempt) time.Time {
+		return e.lastSeen
+	}, evictionSampleSize)
 }

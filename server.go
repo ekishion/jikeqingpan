@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,9 @@ type Server struct {
 	sessionAt    time.Time
 	sessionMu    sync.Mutex
 	auditMu      sync.Mutex
+	auditFile    *os.File
+	auditSize    int64
+	auditMax     int64
 	trustedProxy []*net.IPNet
 }
 
@@ -42,7 +46,8 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		baiduBaseURL: "https://pan.baidu.com",
 		httpClient:   &http.Client{Timeout: 15 * time.Second},
 		shortLinks:   newShortLinkStore(cfg.shortLinkTTL(), cfg.ShortLinkMaxUses),
-		cache:        newFileListCache(),
+		cache:        newFileListCacheWithLimits(maxCachedFiles, cfg.fileCacheTTL(), cfg.dlinkCacheTTL()),
+		auditMax:     defaultAuditMaxBytes,
 		staticRoot:   sub,
 		sessions:     newSessionManager(cfg.sessionSigningKey(), cfg.authSessionTTL()),
 		loginGuard:   newLoginGuard(),
@@ -102,10 +107,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/preview", s.withSecurity(s.handlePreview, securityOpts{
 		requireAuth: true, csrf: true, rateLimit: true, methods: []string{http.MethodPost},
 	}))
+	s.mux.HandleFunc("/api/text", s.withSecurity(s.handleTextPreview, securityOpts{
+		requireAuth: true, csrf: true, rateLimit: true, methods: []string{http.MethodPost},
+	}))
 	s.mux.HandleFunc("/healthz", s.withSecurity(s.handleHealthz, securityOpts{
 		requireAuth: false,
 		csrf:        false,
 		rateLimit:   false,
+		methods:     []string{http.MethodGet, http.MethodHead},
 	}))
 	s.mux.HandleFunc("/readyz", s.withSecurity(s.handleReadyz, securityOpts{
 		requireAuth: true, // 避免未鉴权刷百度探测
@@ -116,13 +125,13 @@ func (s *Server) routes() {
 		requireAuth: true,
 		csrf:        false,
 		rateLimit:   true,
-		methods:     []string{http.MethodGet},
+		methods:     []string{http.MethodGet, http.MethodHead},
 	}))
 	s.mux.HandleFunc("/", s.withSecurity(s.handleStatic, securityOpts{
 		requireAuth: false, // 登录页需要能加载静态资源
 		csrf:        false,
 		rateLimit:   false,
-		methods:     []string{http.MethodGet},
+		methods:     []string{http.MethodGet, http.MethodHead},
 	}))
 }
 
@@ -156,14 +165,18 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 		// 安全响应头
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		// media-src 与 pathsec.go 的下载域名白名单保持一致：<video>/<audio> 经 /d/{token}
+		// 302 到百度直链播放，重定向目标必须被 media-src 允许，否则被默认 'self' 拦截。
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'")
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "+
+				"media-src 'self' https://baidu.com https://*.baidu.com https://baidupcs.com https://*.baidupcs.com https://bdstatic.com https://*.bdstatic.com; "+
+				"frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cache-Control", "no-store")
 
-		// CSRF cookie 下发（GET）
-		if r.Method == http.MethodGet {
+		// CSRF cookie 下发（GET；健康检查无需 Cookie，避免探活请求反复种 Cookie）
+		if r.Method == http.MethodGet && r.URL.Path != "/healthz" {
 			if _, err := r.Cookie(csrfTokenCookieName); err != nil {
 				token, tokenErr := newCSRFToken()
 				if tokenErr != nil {
@@ -216,6 +229,8 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		name = "icons.js"
 	case "/markdown.js":
 		name = "markdown.js"
+	case "/preview.js":
+		name = "preview.js"
 	case "/app.css":
 		name = "app.css"
 	default:
@@ -224,7 +239,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// HTML/JS/CSS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧界面
 	switch name {
-	case "index.html", "app.js", "icons.js", "markdown.js", "app.css":
+	case "index.html", "app.js", "icons.js", "markdown.js", "preview.js", "app.css":
 		w.Header().Set("Cache-Control", "no-store, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 	default:

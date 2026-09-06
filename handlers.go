@@ -120,18 +120,19 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 直链只缓存于服务端，返回给前端前必须移除 dlink 字段。
-	s.cache.update(result.Body)
-	publicBody, err := stripDownloadLinks(result.Body)
-	if err != nil {
-		log.Printf("[ERROR] 清理文件列表直链失败: %v", err)
-		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败，请稍后重试")
-		return
-	}
-	publicBody, err = s.filterFileList(publicBody)
+	// 先按共享范围过滤再写缓存：越界路径不占用缓存空间。
+	// 缓存需要 dlink 字段计算签名，因此先 update 缓存、再剥离 dlink 返回给前端。
+	filteredBody, err := s.filterFileList(result.Body)
 	if err != nil {
 		log.Printf("[ERROR] 过滤共享范围失败: %v", err)
 		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败")
+		return
+	}
+	s.cache.update(filteredBody)
+	publicBody, err := stripDownloadLinks(filteredBody)
+	if err != nil {
+		log.Printf("[ERROR] 清理文件列表直链失败: %v", err)
+		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败，请稍后重试")
 		return
 	}
 
@@ -178,14 +179,14 @@ func (s *Server) handleReadme(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "readme_fetch_failed", "README 暂时不可用")
 		return
 	}
-	const maxReadmeBytes = 512 * 1024
-	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxReadmeBytes+1))
+	maxReadmeBytes := s.cfg.readmeMaxBytes()
+	body, err := io.ReadAll(io.LimitReader(upstream.Body, int64(maxReadmeBytes)+1))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "readme_fetch_failed", "无法读取 README")
 		return
 	}
 	if len(body) > maxReadmeBytes {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "readme_too_large", "README 超过 512 KB，无法展示")
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "readme_too_large", "README 超过大小上限，无法展示")
 		return
 	}
 	if !utf8.Valid(body) {
@@ -205,6 +206,91 @@ func readmeName(filePath string) string {
 		return filePath[index+1:]
 	}
 	return filePath
+}
+
+// textPreviewExts 允许文本预览的扩展名白名单（与 static/preview.js 的 TEXT_PREVIEW_EXTS 保持同步）。
+var textPreviewExts = map[string]struct{}{
+	"txt": {}, "md": {}, "markdown": {}, "json": {}, "xml": {}, "yaml": {}, "yml": {},
+	"csv": {}, "log": {}, "ini": {}, "conf": {}, "sh": {}, "bat": {}, "ps1": {},
+	"py": {}, "js": {}, "ts": {}, "go": {}, "c": {}, "h": {}, "cpp": {}, "hpp": {},
+	"java": {}, "rs": {}, "sql": {}, "toml": {}, "html": {}, "css": {},
+}
+
+func isTextPreviewableExt(name string) bool {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
+	_, ok := textPreviewExts[ext]
+	return ok
+}
+
+// handleTextPreview 返回文本/代码文件内容，供前端在灯箱中安全渲染。
+// 内容以 JSON 字符串回传，前端用 textContent/安全渲染器展示，无注入面。
+func (s *Server) handleTextPreview(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var request struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
+		return
+	}
+	if !isValidBaiduPath(request.Path) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
+		return
+	}
+	if !s.pathAllowed(request.Path) {
+		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
+		return
+	}
+	if !isTextPreviewableExt(request.Path) {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "text_not_allowed", "该文件类型不支持文本预览")
+		return
+	}
+	if meta, err := s.ensureFileMeta(request.Path); err != nil || meta.IsDir == 1 {
+		writeJSONError(w, http.StatusNotFound, "file_not_found", "文件不存在或已被移动")
+		return
+	}
+	dlink, err := s.getBaiduDLink(request.Path, r.Header.Get("User-Agent"))
+	if err != nil || !isAllowedBaiduDownloadURL(dlink) {
+		writeJSONError(w, http.StatusBadGateway, "text_link_failed", "无法准备文本预览")
+		return
+	}
+	upstream, err := s.httpClient.Get(dlink)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "text_fetch_failed", "无法读取文本内容")
+		return
+	}
+	defer upstream.Body.Close()
+	if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+		writeJSONError(w, http.StatusBadGateway, "text_fetch_failed", "文本内容暂时不可用")
+		return
+	}
+	const maxTextBytes = 512 * 1024
+	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxTextBytes+1))
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "text_fetch_failed", "无法读取文本内容")
+		return
+	}
+	truncated := false
+	if len(body) > maxTextBytes {
+		body = body[:maxTextBytes]
+		truncated = true
+	}
+	if truncated {
+		// 截断点可能落在多字节字符中间，最多回退 UTF-8 单字符的最大字节数
+		for i := 0; i < utf8.UTFMax && len(body) > 0 && !utf8.Valid(body); i++ {
+			body = body[:len(body)-1]
+		}
+	}
+	if !utf8.Valid(body) {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "text_not_text", "该文件不是文本内容")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"found":     true,
+		"name":      readmeName(request.Path),
+		"content":   string(body),
+		"truncated": truncated,
+	})
 }
 
 func isReadmeFileName(name string) bool {
@@ -308,7 +394,11 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
 		return
 	}
-	if !isValidBaiduPath(request.Path) || !s.pathAllowed(request.Path) {
+	if !isValidBaiduPath(request.Path) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
+		return
+	}
+	if !s.pathAllowed(request.Path) {
 		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
 		return
 	}
@@ -332,13 +422,16 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "preview_fetch_failed", "图片预览暂时不可用")
 		return
 	}
-	const maxPreviewBytes = 16 * 1024 * 1024
-	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxPreviewBytes+1))
-	if err != nil || len(body) > maxPreviewBytes {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "preview_too_large", "图片超过 16 MB，无法在线预览")
+	maxPreviewBytes := s.cfg.previewMaxBytes()
+	// 上游明确声明超限时直接拒绝，避免白拉整份流量。
+	if upstream.ContentLength > int64(maxPreviewBytes) {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "preview_too_large", "图片超过可预览的大小上限")
 		return
 	}
-	contentType := http.DetectContentType(body)
+	// 只缓冲嗅探所需的前 512 字节，其余流式转发，避免大图整块驻留内存。
+	sniff := make([]byte, 512)
+	n, _ := io.ReadFull(upstream.Body, sniff)
+	contentType := http.DetectContentType(sniff[:n])
 	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(request.Path)))
 	}
@@ -349,13 +442,22 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", "inline")
 	w.Header().Set("Cache-Control", "private, no-store")
-	_, _ = w.Write(body)
+	if upstream.ContentLength > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(upstream.ContentLength, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(sniff[:n]); err != nil {
+		return
+	}
+	// 无 Content-Length 的上游靠限读兜底；超限截断的图片无法渲染，属可接受的降级。
+	_, _ = io.Copy(w, io.LimitReader(upstream.Body, int64(maxPreviewBytes)-int64(n)))
 }
 
 func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, "/d/")
 	token = strings.Trim(token, "/")
-	filePath, ok := s.shortLinks.resolve(token, true)
+	// 先探查不计入使用次数，直链解析成功后才消耗，避免解析失败白耗短链。
+	filePath, ok := s.shortLinks.resolve(token, false)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
 		return
@@ -364,37 +466,6 @@ func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该文件不在共享范围内")
 		return
 	}
-	s.audit(r, "shortlink_accessed", filePath)
-	s.redirectToBaiduDownload(w, r, filePath)
-}
-
-func (s *Server) audit(r *http.Request, event, filePath string) {
-	if s.cfg.AuditLogPath == "" {
-		return
-	}
-	record := map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "event": event, "path": filePath, "ip": s.requestClientIP(r), "user_agent": r.UserAgent()}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return
-	}
-	s.auditMu.Lock()
-	defer s.auditMu.Unlock()
-	if dir := filepath.Dir(s.cfg.AuditLogPath); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			log.Printf("[audit] create directory failed: %v", err)
-			return
-		}
-	}
-	f, err := os.OpenFile(s.cfg.AuditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		log.Printf("[audit] open failed: %v", err)
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(append(data, '\n'))
-}
-
-func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request, filePath string) {
 	dlink, err := s.getBaiduDLink(filePath, r.Header.Get("User-Agent"))
 	if err != nil {
 		log.Printf("[ERROR] 获取百度直链失败: %v", err)
@@ -406,5 +477,93 @@ func (s *Server) redirectToBaiduDownload(w http.ResponseWriter, r *http.Request,
 		writeJSONError(w, http.StatusBadGateway, "dlink_rejected", "下载失败，请稍后重试")
 		return
 	}
+	if _, consumed := s.shortLinks.resolve(token, true); !consumed {
+		// 探查与消耗之间短链恰好过期或耗尽，按失效处理。
+		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
+		return
+	}
+	s.audit(r, "shortlink_accessed", filePath)
 	http.Redirect(w, r, dlink, http.StatusFound)
+}
+
+// defaultAuditMaxBytes 审计日志滚动阈值：超过后轮转为 *.old，磁盘占用有界。
+const defaultAuditMaxBytes = 10 * 1024 * 1024
+
+func (s *Server) audit(r *http.Request, event, filePath string) {
+	if s.cfg.AuditLogPath == "" {
+		return
+	}
+	record := map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "event": event, "path": filePath, "ip": s.requestClientIP(r), "user_agent": r.UserAgent()}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	if err := s.writeAuditLocked(data); err != nil {
+		log.Printf("[audit] write failed: %v", err)
+	}
+}
+
+// writeAuditLocked 写入审计记录，超限时滚动。调用方需持有 auditMu。
+func (s *Server) writeAuditLocked(data []byte) error {
+	if s.auditFile == nil {
+		if err := s.openAuditFileLocked(); err != nil {
+			return err
+		}
+	}
+	if s.auditSize+int64(len(data)) > s.auditMax {
+		s.rotateAuditFileLocked()
+	}
+	n, err := s.auditFile.Write(data)
+	s.auditSize += int64(n)
+	return err
+}
+
+func (s *Server) openAuditFileLocked() error {
+	if dir := filepath.Dir(s.cfg.AuditLogPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(s.cfg.AuditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	s.auditFile = f
+	s.auditSize = info.Size()
+	return nil
+}
+
+// rotateAuditFileLocked 关闭当前文件、轮转为 .old（覆盖上一次的 .old）后重开。
+func (s *Server) rotateAuditFileLocked() {
+	if s.auditFile != nil {
+		_ = s.auditFile.Close()
+		s.auditFile = nil
+	}
+	if err := os.Rename(s.cfg.AuditLogPath, s.cfg.AuditLogPath+".old"); err != nil && !os.IsNotExist(err) {
+		log.Printf("[audit] rotate failed: %v", err)
+	}
+	if err := s.openAuditFileLocked(); err != nil {
+		log.Printf("[audit] reopen after rotate failed: %v", err)
+	}
+}
+
+// closeAudit 关闭审计日志句柄（优雅关闭时调用）。
+func (s *Server) closeAudit() {
+	if s.cfg == nil || s.cfg.AuditLogPath == "" {
+		return
+	}
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	if s.auditFile != nil {
+		_ = s.auditFile.Close()
+		s.auditFile = nil
+	}
 }

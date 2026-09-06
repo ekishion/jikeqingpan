@@ -72,4 +72,5 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("关闭服务失败: %v", err)
 	}
+	srv.closeAudit()
 }

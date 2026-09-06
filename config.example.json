@@ -15,5 +15,10 @@
   "audit_log_path": "./data/download-audit.jsonl",
   "allowed_paths": [],
   "show_readme": true,
-  "show_readme_overview": true
+  "show_readme_overview": true,
+  "list_max_pages": 15,
+  "preview_max_bytes": 16777216,
+  "readme_max_bytes": 524288,
+  "file_cache_ttl_seconds": 900,
+  "dlink_cache_ttl_seconds": 300
 }
