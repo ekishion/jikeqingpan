@@ -120,3 +120,54 @@ func (s *shortLinkStore) resolve(token string, consume bool) (string, bool) {
 	}
 	return link.filePath, true
 }
+
+// snapshot 导出未过期且仍有剩余次数的条目用于落盘。
+func (s *shortLinkStore) snapshot() []persistedLink {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make([]persistedLink, 0, len(s.links))
+	for token, link := range s.links {
+		if !now.Before(link.expiresAt) {
+			continue
+		}
+		if link.maxUses > 0 && link.uses >= link.maxUses {
+			continue
+		}
+		out = append(out, persistedLink{
+			Token:     token,
+			Path:      link.filePath,
+			ExpiresAt: link.expiresAt.UnixNano(),
+			CreatedAt: link.createdAt.UnixNano(),
+			Uses:      link.uses,
+		})
+	}
+	return out
+}
+
+// restore 从落盘快照恢复；过期、超次或格式非法的条目直接丢弃。
+// maxUses 取当前配置值（次数上限随部署策略走，不随快照）。
+func (s *shortLinkStore) restore(links []persistedLink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, l := range links {
+		if !shortLinkTokenRe.MatchString(l.Token) {
+			continue
+		}
+		expiresAt := time.Unix(0, l.ExpiresAt)
+		if !now.Before(expiresAt) {
+			continue
+		}
+		if s.maxUses > 0 && l.Uses >= s.maxUses {
+			continue
+		}
+		s.links[l.Token] = shortLink{
+			filePath:  l.Path,
+			expiresAt: expiresAt,
+			createdAt: time.Unix(0, l.CreatedAt),
+			maxUses:   s.maxUses,
+			uses:      l.Uses,
+		}
+	}
+}

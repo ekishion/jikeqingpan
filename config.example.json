@@ -11,6 +11,8 @@
   "short_link_ttl_seconds": 3600,
   "short_link_max_uses": 0,
   "dir_link_ttl_seconds": 604800,
+  "state_backend": "none",
+  "state_path": "./data/state.db",
   "session_ttl_seconds": 3600,
   "trusted_proxy_ips": ["127.0.0.1", "::1"],
   "audit_log_path": "./data/download-audit.jsonl",
@@ -18,8 +20,8 @@
   "show_readme": true,
   "show_readme_overview": true,
   "list_max_pages": 15,
-  "preview_max_bytes": 16777216,
-  "readme_max_bytes": 524288,
+  "preview_max_mb": 16,
+  "readme_max_mb": 0,
   "file_cache_ttl_seconds": 900,
   "dlink_cache_ttl_seconds": 300
 }

@@ -17,8 +17,6 @@
 ├── httputil.go          # Cookie / CSRF / 访问校验 / 客户端 IP 辅助
 ├── session.go           # HMAC 签名登录会话（签发与校验）
 ├── loginguard.go        # 登录失败按 IP 指数退避锁定
-├── security_test.go     # 安全相关单测
-├── auth_test.go         # 登录 / 会话 / 防爆破单测
 ├── static/              # 前端（go:embed）
 │   ├── index.html       # 页面结构
 │   ├── app.css          # 样式（纯白极简 · 深色跟随系统/可手动切换）
@@ -53,10 +51,12 @@ go run . -config config.json
 
 ## 测试与检查
 
+测试文件（`*_test.go`）仅本地保留、不入库（.gitignore 已忽略）：
+
 ```bash
-go test ./...
 go vet ./...
 go build -trimpath -ldflags="-s -w" -o cmd/bin/main .
+go test ./...   # 有本地测试文件时才会执行
 ```
 
 或：

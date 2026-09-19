@@ -19,6 +19,8 @@ const (
 	fileListPageSize = 100
 	// 默认的单次列表请求翻页上限，可用 list_max_pages 配置。
 	defaultFileListMaxPages = 15
+	// baiduClientTimeout 单次百度请求超时；server.go 与 baidu.go 共用，避免字面量漂移。
+	baiduClientTimeout = 15 * time.Second
 )
 
 // listFetchResult 目录列表拉取结果（含截断信息）
@@ -248,18 +250,21 @@ func (s *Server) clearSession() {
 	s.sessionMu.Unlock()
 }
 
-// locatedownloadRand 使用 SHA-1 计算位于下载的 rand 参数
+// locatedownloadRand 使用 SHA-1 计算位于下载的 rand 参数。
+// 哈希算法由百度 locatedownload API 契约固定（服务端按同样方式校验），
+// 非本项目的加密选型，不存在可替换的更强算法。
 func locatedownloadRand(uk int64, sk string, nowMilli int64) string {
 	data := fmt.Sprintf("%d%s%d0", uk, sk, nowMilli)
-	h := sha1.New()
+	h := sha1.New() // #nosec G401 -- 百度 API 契约要求的签名算法
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// locatedownloadSign 使用 MD5 计算位于下载的 sign 参数
+// locatedownloadSign 使用 MD5 计算位于下载的 sign 参数。
+// 同上：MD5 为百度 API 契约固定要求，非安全敏感用途。
 func locatedownloadSign(fileMD5 string, fileID string, uk int64, nowMilli int64) string {
 	data := fmt.Sprintf("%s_%d_%s_%d", fileMD5, uk, fileID, nowMilli)
-	h := md5.New()
+	h := md5.New() // #nosec G501 -- 百度 API 契约要求的签名算法
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -383,7 +388,7 @@ func (s *Server) baiduGet(apiURL string, ua string) ([]byte, error) {
 
 	client := s.httpClient
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = &http.Client{Timeout: baiduClientTimeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -2,11 +2,14 @@ package main
 
 import (
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +35,10 @@ type Server struct {
 	auditSize    int64
 	auditMax     int64
 	trustedProxy []*net.IPNet
+	persist      statePersistence
+	persistMu    sync.Mutex
+	flushStop    chan struct{}
+	stateDirty   atomic.Bool
 }
 
 func newServer(cfg *Config, staticContent fs.FS) *Server {
@@ -45,7 +52,7 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		limiter:      newRateLimiter(cfg.RateLimitPerSecond),
 		mux:          http.NewServeMux(),
 		baiduBaseURL: "https://pan.baidu.com",
-		httpClient:   &http.Client{Timeout: 15 * time.Second},
+		httpClient:   &http.Client{Timeout: baiduClientTimeout},
 		shortLinks:   newShortLinkStore(cfg.shortLinkTTL(), cfg.ShortLinkMaxUses),
 		dirLinks:     newDirLinkStore(cfg.dirLinkTTL()),
 		cache:        newFileListCacheWithLimits(maxCachedFiles, cfg.fileCacheTTL(), cfg.dlinkCacheTTL()),
@@ -67,6 +74,8 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 		}
 	}
 	s.routes()
+	s.restorePersistedState()
+	s.startStateFlusher()
 	return s
 }
 
@@ -150,6 +159,109 @@ type securityOpts struct {
 	methods     []string
 }
 
+// ===== 状态持久化 =====
+
+// restorePersistedState 启动时从持久化后端恢复短链状态。
+// 读取失败（文件损坏等）时把原文件改名留存后重建，服务不因此拒绝启动。
+func (s *Server) restorePersistedState() {
+	persist, err := newStatePersistence(s.cfg)
+	if err != nil {
+		log.Printf("[WARN] 状态持久化初始化失败，本次运行仅内存模式: %v", err)
+		return
+	}
+	if persist == nil {
+		return
+	}
+	st, err := persist.Load()
+	if err != nil {
+		backup := s.cfg.StatePath + ".corrupt-" + strconv.FormatInt(time.Now().Unix(), 10)
+		_ = persist.Close()
+		if renameErr := os.Rename(s.cfg.StatePath, backup); renameErr == nil {
+			log.Printf("[WARN] 状态文件损坏已留存为 %s: %v", backup, err)
+		} else {
+			log.Printf("[WARN] 状态文件损坏且无法留存: %v", err)
+		}
+		persist, err = newStatePersistence(s.cfg)
+		if err != nil || persist == nil {
+			return
+		}
+		st = &persistedState{Version: 1}
+	}
+	s.dirLinks.restore(st.DirLinks)
+	s.shortLinks.restore(st.ShortLinks)
+	s.persist = persist
+	log.Printf("[状态] 已恢复目录短链 %d 条、下载短链 %d 条", len(st.DirLinks), len(st.ShortLinks))
+}
+
+// startStateFlusher 周期把变脏的状态落盘（30s）。
+func (s *Server) startStateFlusher() {
+	if s.persist == nil {
+		return
+	}
+	s.flushStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if !s.stateDirty.CompareAndSwap(true, false) {
+					continue
+				}
+				if err := s.flushState(); err != nil {
+					log.Printf("[WARN] 状态落盘失败，下个周期重试: %v", err)
+					s.stateDirty.Store(true)
+				}
+			case <-s.flushStop:
+				return
+			}
+		}
+	}()
+}
+
+// markStateDirty 标记状态有变化，等待周期落盘。
+func (s *Server) markStateDirty() {
+	if s.persist != nil {
+		s.stateDirty.Store(true)
+	}
+}
+
+// flushState 立即把当前快照写入持久化后端。
+// persistMu 串行化周期 flush 与关闭时的最终 flush：JSON 后端并发 Save
+// 会竞争同一个 .tmp 文件，竞态下可能落盘损坏快照。
+func (s *Server) flushState() error {
+	if s.persist == nil {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	st := &persistedState{
+		Version:    1,
+		DirLinks:   s.dirLinks.snapshot(),
+		ShortLinks: s.shortLinks.snapshot(),
+	}
+	return s.persist.Save(st)
+}
+
+// closePersist 优雅关闭时强制落盘并关闭后端；可安全重复调用。
+func (s *Server) closePersist() {
+	if s.persist == nil {
+		return
+	}
+	if s.flushStop != nil {
+		close(s.flushStop)
+		s.flushStop = nil
+	}
+	if err := s.flushState(); err != nil {
+		log.Printf("[WARN] 关闭前状态落盘失败: %v", err)
+	}
+	if err := s.persist.Close(); err != nil {
+		log.Printf("[WARN] 关闭持久化后端失败: %v", err)
+	}
+	// 迟到的周期 flush 变 no-op，避免打在已关闭的库上
+	s.persist = nil
+}
+
 func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 方法限制
@@ -225,33 +337,25 @@ func (s *Server) withSecurity(next http.HandlerFunc, opts securityOpts) http.Han
 	}
 }
 
+// staticRoutes 静态资源白名单：URL 路径 → 嵌入文件名。
+// 新增静态文件只需在此登记一处（统一 no-store，避免部署后用旧界面）。
+var staticRoutes = map[string]string{
+	"/":            "index.html",
+	"/index.html":  "index.html",
+	"/app.js":      "app.js",
+	"/icons.js":    "icons.js",
+	"/markdown.js": "markdown.js",
+	"/preview.js":  "preview.js",
+	"/app.css":     "app.css",
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	// 只允许访问已知静态文件，防止目录枚举
-	var name string
-	switch r.URL.Path {
-	case "/", "/index.html":
-		name = "index.html"
-	case "/app.js":
-		name = "app.js"
-	case "/icons.js":
-		name = "icons.js"
-	case "/markdown.js":
-		name = "markdown.js"
-	case "/preview.js":
-		name = "preview.js"
-	case "/app.css":
-		name = "app.css"
-	default:
+	name, ok := staticRoutes[r.URL.Path]
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	// HTML/JS/CSS 更新频繁且嵌入二进制，禁用强缓存，避免部署后仍用旧界面
-	switch name {
-	case "index.html", "app.js", "icons.js", "markdown.js", "preview.js", "app.css":
-		w.Header().Set("Cache-Control", "no-store, max-age=0")
-		w.Header().Set("Pragma", "no-cache")
-	default:
-		w.Header().Set("Cache-Control", "public, max-age=3600")
-	}
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
 	http.ServeFileFS(w, r, s.staticRoot, name)
 }

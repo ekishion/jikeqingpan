@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p cmd/bin
-go build -trimpath -ldflags="-s -w" -o cmd/bin/main .
-echo "built: cmd/bin/main"
+version=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+go build -trimpath -ldflags="-s -w -X main.version=${version}" -o cmd/bin/main .
+echo "built: cmd/bin/main (version: ${version})"

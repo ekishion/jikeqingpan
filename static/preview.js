@@ -107,6 +107,14 @@ function loadImagePreview(filePath, seq) {
     body: JSON.stringify({ path: filePath })
   })
     .then(function (resp) {
+      if (resp.status === 401) {
+        // 会话失效：走统一的重新验证流程，与列表加载一致
+        return resp.text().then(function (text) {
+          closeLightbox();
+          requireLogin(parseAPIError(resp, text));
+          throw new Error("unauthorized");
+        });
+      }
       if (!resp.ok) {
         return resp.text().then(function (text) { throw new Error(parseAPIError(resp, text)); });
       }
@@ -126,8 +134,10 @@ function loadImagePreview(filePath, seq) {
       image.hidden = false;
     })
     .catch(function (err) {
-      if (seq === previewState.seq) closeLightbox();
-      showToast("预览失败：" + err.message, "error");
+      if (seq === previewState.seq && err.message !== "unauthorized") {
+        closeLightbox();
+        showToast("预览失败：" + err.message, "error");
+      }
     });
 }
 
@@ -138,6 +148,13 @@ function loadTextPreview(filePath, fileName, seq) {
     body: JSON.stringify({ path: filePath })
   })
     .then(function (resp) {
+      if (resp.status === 401) {
+        return resp.text().then(function (text) {
+          closeLightbox();
+          requireLogin(parseAPIError(resp, text));
+          throw new Error("unauthorized");
+        });
+      }
       return resp.text().then(function (text) {
         if (!resp.ok) throw new Error(parseAPIError(resp, text));
         return JSON.parse(text);
@@ -164,8 +181,10 @@ function loadTextPreview(filePath, fileName, seq) {
       setLightboxCaption(fileName, !!data.truncated);
     })
     .catch(function (err) {
-      if (seq === previewState.seq) closeLightbox();
-      showToast("预览失败：" + err.message, "error");
+      if (seq === previewState.seq && err.message !== "unauthorized") {
+        closeLightbox();
+        showToast("预览失败：" + err.message, "error");
+      }
     });
 }
 
@@ -226,6 +245,7 @@ function updateMediaUI() {
   const fill = document.getElementById("media-fill");
   const thumb = document.getElementById("media-thumb");
   const time = document.getElementById("media-time");
+  const seek = document.getElementById("media-seek");
   const pct = isFinite(el.duration) && el.duration > 0
     ? Math.min(100, (el.currentTime / el.duration) * 100)
     : 0;
@@ -233,6 +253,13 @@ function updateMediaUI() {
   if (thumb) thumb.style.left = pct + "%";
   if (time) {
     time.textContent = formatMediaTime(el.currentTime) + " / " + formatMediaTime(el.duration);
+  }
+  if (seek && isFinite(el.duration) && el.duration > 0) {
+    // 进度条以 slider 角色暴露给读屏器
+    seek.setAttribute("aria-valuemax", String(Math.round(el.duration)));
+    seek.setAttribute("aria-valuenow", String(Math.round(el.currentTime)));
+    seek.setAttribute("aria-valuetext",
+      formatMediaTime(el.currentTime) + " / " + formatMediaTime(el.duration));
   }
 }
 
@@ -458,7 +485,7 @@ function updateLightboxNav() {
 function setLightboxCaption(name, truncated) {
   const caption = document.getElementById("lightbox-caption");
   if (!caption) return;
-  caption.textContent = truncated ? name + "（仅显示前 512 KB）" : name;
+  caption.textContent = truncated ? name + "（内容过长，已截断显示）" : name;
 }
 
 // ===== 事件绑定 =====
@@ -531,6 +558,26 @@ function bindLightboxEvents() {
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") closeLightbox();
   });
+
+  // 移动端滑动切图（仅图片预览且有多张时）
+  let touchStartX = 0;
+  let touchStartY = 0;
+  lightbox.addEventListener("touchstart", function (event) {
+    if (event.touches.length !== 1) return;
+    touchStartX = event.touches[0].clientX;
+    touchStartY = event.touches[0].clientY;
+  }, { passive: true });
+  lightbox.addEventListener("touchend", function (event) {
+    if (previewState.kind !== "image" || previewNavList.length < 2) return;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - touchStartX;
+    const dy = touch.clientY - touchStartY;
+    // 水平位移足够大且明显大于纵向才判定为滑动，避免误伤缩放点击
+    if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 2) {
+      navigatePreview(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
 }
 
 document.addEventListener("DOMContentLoaded", bindLightboxEvents);

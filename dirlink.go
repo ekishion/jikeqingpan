@@ -104,3 +104,44 @@ func (s *dirLinkStore) resolve(token string) (string, bool) {
 	}
 	return link.dir, true
 }
+
+// snapshot 导出未过期的条目用于落盘。
+func (s *dirLinkStore) snapshot() []persistedLink {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make([]persistedLink, 0, len(s.links))
+	for token, link := range s.links {
+		if !now.Before(link.expiresAt) {
+			continue
+		}
+		out = append(out, persistedLink{
+			Token:     token,
+			Path:      link.dir,
+			ExpiresAt: link.expiresAt.UnixNano(),
+			CreatedAt: link.createdAt.UnixNano(),
+		})
+	}
+	return out
+}
+
+// restore 从落盘快照恢复；过期或格式非法的条目直接丢弃。
+func (s *dirLinkStore) restore(links []persistedLink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, l := range links {
+		if !dirLinkTokenRe.MatchString(l.Token) {
+			continue
+		}
+		expiresAt := time.Unix(0, l.ExpiresAt)
+		if !now.Before(expiresAt) {
+			continue
+		}
+		s.links[l.Token] = dirLink{
+			dir:       l.Path,
+			expiresAt: expiresAt,
+			createdAt: time.Unix(0, l.CreatedAt),
+		}
+	}
+}

@@ -41,8 +41,15 @@ type Config struct {
 	ShortLinkMaxUses int `json:"short_link_max_uses"`
 
 	// DirLinkTTLSeconds 目录短链有效期，默认 7 天。目录短链用于地址栏
-	// 分享/书签（?d=令牌），重启后失效（内存模型）。
+	// 分享/书签（?d=令牌）。
 	DirLinkTTLSeconds int `json:"dir_link_ttl_seconds"`
+
+	// StateBackend 状态持久化后端：none（默认，重启后短链全部失效）|
+	// sqlite（state_path 为 .db 文件）| json（原子快照文件）。
+	// 持久化范围：目录短链与下载短链；缓存/限流状态不持久化。
+	StateBackend string `json:"state_backend"`
+	// StatePath 持久化文件路径；state_backend 非 none 时必填。
+	StatePath string `json:"state_path"`
 
 	// SessionTTLSeconds 百度 uk/sk 会话缓存有效期，默认 3600。
 	SessionTTLSeconds  int      `json:"session_ttl_seconds"`
@@ -54,10 +61,10 @@ type Config struct {
 
 	// ListMaxPages 目录列表自动翻页上限；0 表示默认 15 页（每页 100 项）。
 	ListMaxPages int `json:"list_max_pages"`
-	// PreviewMaxBytes 图片预览大小上限；0 表示默认 16 MB。
-	PreviewMaxBytes int `json:"preview_max_bytes"`
-	// ReadmeMaxBytes README 内容大小上限；0 表示默认 512 KB。
-	ReadmeMaxBytes int `json:"readme_max_bytes"`
+	// PreviewMaxMB 图片预览大小上限（MB，整数）；0 表示默认 16 MB。
+	PreviewMaxMB int `json:"preview_max_mb"`
+	// ReadmeMaxMB README/文本预览大小上限（MB，整数）；0 表示默认 512 KB。
+	ReadmeMaxMB int `json:"readme_max_mb"`
 	// FileCacheTTLSeconds 文件元数据缓存有效期；0 表示默认 15 分钟。
 	FileCacheTTLSeconds int `json:"file_cache_ttl_seconds"`
 	// DlinkCacheTTLSeconds 下载直链缓存有效期；0 表示默认 5 分钟。
@@ -110,18 +117,18 @@ func (c *Config) listMaxPages() int {
 	return 15
 }
 
-// previewMaxBytes 图片预览大小上限，默认 16 MB。
+// previewMaxBytes 图片预览大小上限（由 MB 换算），默认 16 MB。
 func (c *Config) previewMaxBytes() int {
-	if c.PreviewMaxBytes > 0 {
-		return c.PreviewMaxBytes
+	if c.PreviewMaxMB > 0 {
+		return c.PreviewMaxMB * 1024 * 1024
 	}
 	return 16 * 1024 * 1024
 }
 
-// readmeMaxBytes README 内容大小上限，默认 512 KB。
+// readmeMaxBytes README/文本预览大小上限（由 MB 换算），默认 512 KB。
 func (c *Config) readmeMaxBytes() int {
-	if c.ReadmeMaxBytes > 0 {
-		return c.ReadmeMaxBytes
+	if c.ReadmeMaxMB > 0 {
+		return c.ReadmeMaxMB * 1024 * 1024
 	}
 	return 512 * 1024
 }
@@ -213,6 +220,12 @@ func applyEnvOverrides(c *Config) {
 	if n, ok := envInt("DIR_LINK_TTL_SECONDS"); ok {
 		c.DirLinkTTLSeconds = n
 	}
+	if v := strings.TrimSpace(os.Getenv("STATE_BACKEND")); v != "" {
+		c.StateBackend = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_PATH")); v != "" {
+		c.StatePath = v
+	}
 	if n, ok := envInt("SESSION_TTL_SECONDS"); ok {
 		c.SessionTTLSeconds = n
 	}
@@ -236,11 +249,11 @@ func applyEnvOverrides(c *Config) {
 	if n, ok := envInt("LIST_MAX_PAGES"); ok {
 		c.ListMaxPages = n
 	}
-	if n, ok := envInt("PREVIEW_MAX_BYTES"); ok {
-		c.PreviewMaxBytes = n
+	if n, ok := envInt("PREVIEW_MAX_MB"); ok {
+		c.PreviewMaxMB = n
 	}
-	if n, ok := envInt("README_MAX_BYTES"); ok {
-		c.ReadmeMaxBytes = n
+	if n, ok := envInt("README_MAX_MB"); ok {
+		c.ReadmeMaxMB = n
 	}
 	if n, ok := envInt("FILE_CACHE_TTL_SECONDS"); ok {
 		c.FileCacheTTLSeconds = n
@@ -295,6 +308,19 @@ func (c *Config) normalizeAndValidate() error {
 	if c.DirLinkTTLSeconds < 0 {
 		return fmt.Errorf("dir_link_ttl_seconds 不能为负数")
 	}
+	c.StateBackend = strings.ToLower(strings.TrimSpace(c.StateBackend))
+	if c.StateBackend == "" {
+		c.StateBackend = "none"
+	}
+	switch c.StateBackend {
+	case "none", "sqlite", "json":
+	default:
+		return fmt.Errorf("state_backend 必须是 none、sqlite 或 json")
+	}
+	c.StatePath = strings.TrimSpace(c.StatePath)
+	if c.StateBackend != "none" && c.StatePath == "" {
+		return fmt.Errorf("state_backend=%s 时必须配置 state_path", c.StateBackend)
+	}
 	if c.ShortLinkMaxUses < 0 {
 		return fmt.Errorf("short_link_max_uses 不能为负数")
 	}
@@ -307,11 +333,11 @@ func (c *Config) normalizeAndValidate() error {
 	if c.ListMaxPages != 0 && (c.ListMaxPages < 1 || c.ListMaxPages > 100) {
 		return fmt.Errorf("list_max_pages 必须在 1 到 100 之间")
 	}
-	if c.PreviewMaxBytes < 0 {
-		return fmt.Errorf("preview_max_bytes 不能为负数")
+	if c.PreviewMaxMB < 0 {
+		return fmt.Errorf("preview_max_mb 不能为负数")
 	}
-	if c.ReadmeMaxBytes < 0 {
-		return fmt.Errorf("readme_max_bytes 不能为负数")
+	if c.ReadmeMaxMB < 0 {
+		return fmt.Errorf("readme_max_mb 不能为负数")
 	}
 	if c.FileCacheTTLSeconds < 0 {
 		return fmt.Errorf("file_cache_ttl_seconds 不能为负数")

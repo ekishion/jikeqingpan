@@ -37,7 +37,9 @@ openssl rand -hex 24
 | `baidu_app_id` | `BAIDU_APP_ID` | `250528` | 百度 App ID |
 | `short_link_ttl_seconds` | `SHORT_LINK_TTL_SECONDS` | `3600` | 下载短链有效期（秒） |
 | `short_link_max_uses` | `SHORT_LINK_MAX_USES` | `0` | 下载短链最大使用次数；`0` 不限制 |
-| `dir_link_ttl_seconds` | `DIR_LINK_TTL_SECONDS` | `604800` | 目录短链有效期（秒，地址栏 `?d=` 令牌），默认 7 天；重启后失效 |
+| `dir_link_ttl_seconds` | `DIR_LINK_TTL_SECONDS` | `604800` | 目录短链有效期（秒，地址栏 `?d=` 令牌），默认 7 天 |
+| `state_backend` | `STATE_BACKEND` | `none` | 状态持久化后端：`none`（重启后短链全部失效）/ `sqlite`（推荐）/ `json`（原子快照文件） |
+| `state_path` | `STATE_PATH` | 空 | 持久化文件路径（如 `./data/state.db`）；`state_backend` 非 `none` 时必填，父目录自动创建。持久化范围：目录短链 + 下载短链 |
 | `session_ttl_seconds` | `SESSION_TTL_SECONDS` | `3600` | 百度 uk/sk 缓存（秒） |
 | `trusted_proxy_ips` | `TRUSTED_PROXY_IPS` | 空 | 允许读取 `X-Forwarded-For` 的反代 IP 或 CIDR；仅填写实际反代来源 |
 | `audit_log_path` | `AUDIT_LOG_PATH` | 空 | JSONL 下载审计日志路径；为空时关闭持久化，父目录不存在时会自动创建 |
@@ -45,8 +47,8 @@ openssl rand -hex 24
 | `show_readme` | `SHOW_README` | `true` | 是否在目录顶部展示网盘中的 README |
 | `show_readme_overview` | `SHOW_README_OVERVIEW` | `true` | 是否在 README 右侧展示目录概览 |
 | `list_max_pages` | `LIST_MAX_PAGES` | `15` | 目录列表自动翻页上限（每页 100 项，15 页即 1500 项） |
-| `preview_max_bytes` | `PREVIEW_MAX_BYTES` | `16777216` | 图片预览大小上限（字节），默认 16 MB |
-| `readme_max_bytes` | `README_MAX_BYTES` | `524288` | README 内容大小上限（字节），默认 512 KB |
+| `preview_max_mb` | `PREVIEW_MAX_MB` | `16` | 图片预览大小上限（MB，整数） |
+| `readme_max_mb` | `README_MAX_MB` | `0` | README/文本预览大小上限（MB，整数）；`0` 表示默认 512 KB |
 | `file_cache_ttl_seconds` | `FILE_CACHE_TTL_SECONDS` | `900` | 文件元数据缓存有效期（秒） |
 | `dlink_cache_ttl_seconds` | `DLINK_CACHE_TTL_SECONDS` | `300` | 下载直链缓存有效期（秒） |
 | — | `CONFIG_PATH` | `config.json` / 容器内 `/data/config.json` | 配置文件路径 |

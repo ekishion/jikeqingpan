@@ -2,7 +2,7 @@
 
 基于**百度网盘青春版**的临时中转网盘。
 
-- 后端：Go（标准库，无第三方依赖）
+- 后端：Go 标准库为主；可选启用状态持久化时使用纯 Go SQLite 驱动（modernc.org/sqlite，无 CGO）
 - 前端：静态 HTML / CSS / JS（`go:embed` 打进二进制，无外部依赖与 CDN）
 - Cookie 只保存在服务端，不暴露给浏览器
 - **VPS 给少数人用**：配置 `access_token` 启用访问控制

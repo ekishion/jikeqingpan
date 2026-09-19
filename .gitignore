@@ -10,3 +10,6 @@ cmd/bin/
 # 运行时数据（审计日志等）
 data/
 .zcode/
+.mimosa/
+# 测试文件仅本地保留，不入库
+*_test.go

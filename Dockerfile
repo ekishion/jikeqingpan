@@ -1,17 +1,18 @@
 # syntax=docker/dockerfile:1
 
 # ---- build ----
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates
 
-COPY go.mod ./
+COPY go.mod go.sum* ./
 COPY *.go ./
 COPY static ./static
 
-# 纯标准库；不写死 GOARCH，便于 buildx 多架构（amd64/arm64）
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/jikeqingpan .
+# 纯标准库为主（SQLite 持久化为纯 Go 驱动）；不写死 GOARCH，便于 buildx 多架构（amd64/arm64）
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/jikeqingpan .
 
 # ---- runtime ----
 FROM alpine:3.20

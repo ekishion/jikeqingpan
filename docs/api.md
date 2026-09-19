@@ -159,7 +159,7 @@ X-CSRF-Token: <csrf_token>
 ```
 
 - 仅允许图片 MIME 类型；服务端同时结合文件内容和扩展名识别类型
-- 单张图片默认最大 16 MB（`preview_max_bytes` 可调）
+- 单张图片默认最大 16 MB（`preview_max_mb` 可调，单位 MB）
 - 预览内容会经过 VPS，因此会产生 VPS 出站流量；普通下载仍使用百度直链重定向
 - 常见错误：`preview_link_failed`、`preview_fetch_failed`、`preview_not_image`、`preview_too_large`
 

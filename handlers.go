@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version})
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +202,7 @@ func (s *Server) handleDirLink(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "dirlink_failed", "生成目录链接失败，请重试")
 		return
 	}
+	s.markStateDirty()
 	s.audit(r, "dirlink_issued", dir)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token": token,
@@ -333,8 +334,9 @@ func (s *Server) handleTextPreview(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "text_fetch_failed", "文本内容暂时不可用")
 		return
 	}
-	const maxTextBytes = 512 * 1024
-	body, err := io.ReadAll(io.LimitReader(upstream.Body, maxTextBytes+1))
+	// 与 README 同一文本内容上限配置，避免两处限制漂移。
+	maxTextBytes := s.cfg.readmeMaxBytes()
+	body, err := io.ReadAll(io.LimitReader(upstream.Body, int64(maxTextBytes)+1))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "text_fetch_failed", "无法读取文本内容")
 		return
@@ -444,6 +446,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "shortlink_failed", "生成下载链接失败，请重试")
 		return
 	}
+	s.markStateDirty()
 	s.audit(r, "shortlink_issued", filePath)
 	respJSON, err := downloadJSONResponse("/d/" + token)
 	if err != nil {
@@ -551,6 +554,7 @@ func (s *Server) handleShortDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "shortlink_not_found", "下载链接已失效，请重新获取")
 		return
 	}
+	s.markStateDirty()
 	s.audit(r, "shortlink_accessed", filePath)
 	http.Redirect(w, r, dlink, http.StatusFound)
 }

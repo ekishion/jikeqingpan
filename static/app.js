@@ -33,6 +33,9 @@ let readmeCache = null;
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+  // 移动端浏览器地址栏底色随主题
+  const themeColor = document.querySelector('meta[name="theme-color"]');
+  if (themeColor) themeColor.setAttribute("content", theme === "dark" ? "#0a0a0b" : "#ffffff");
   const btn = document.getElementById("btn-theme");
   if (btn) {
     const iconWrap = btn.querySelector(".btn-icon");
@@ -623,12 +626,17 @@ function showLogin(show) {
 function updateAuthUI() {
   const logoutBtn = document.getElementById("btn-logout");
   const loginBtn = document.getElementById("btn-login-open");
+  const shareBtn = document.getElementById("btn-share");
   if (logoutBtn) {
     logoutBtn.hidden = !(authRequired && authenticated);
   }
   if (loginBtn) {
     // 需要鉴权且未登录时，始终提供手动入口
     loginBtn.hidden = !(authRequired && !authenticated);
+  }
+  if (shareBtn) {
+    // 未开启鉴权或已登录时可用
+    shareBtn.hidden = authRequired && !authenticated;
   }
 }
 
@@ -777,7 +785,13 @@ function doLogin(token) {
   }).then(function (resp) {
     return resp.text().then(function (text) {
       if (!resp.ok) {
-        throw new Error(parseAPIError(resp, text));
+        const err = new Error(parseAPIError(resp, text));
+        if (resp.status === 429) {
+          // 服务端返回了精确的锁定剩余秒数，用于前端倒计时
+          const retry = parseInt(resp.headers.get("Retry-After") || "", 10);
+          if (!isNaN(retry) && retry > 0) err.retryAfter = retry;
+        }
+        throw err;
       }
       authRequired = true;
       authenticated = true;
@@ -839,26 +853,87 @@ function bindLoginForm(loginForm) {
     setButtonLoading(btn, true, "验证中…");
     doLogin(token)
       .catch(function (err) {
-        if (errEl) {
+        if (err && err.retryAfter) {
+          // 锁定期内禁用提交按钮并显示倒计时
+          startLoginCountdown(err.retryAfter);
+        } else if (errEl) {
           errEl.hidden = false;
           errEl.textContent = err.message || "验证失败，请重试";
-        }
-        showLogin(true);
-        if (input) {
-          input.focus();
-          input.select();
+          showLogin(true);
+          if (input) {
+            input.focus();
+            input.select();
+          }
         }
       })
       .finally(function () {
-        setButtonLoading(btn, false);
+        // 倒计时接管按钮时保持禁用，setButtonLoading 不再重复恢复
+        if (!btn || !btn.dataset.countdown) setButtonLoading(btn, false);
       });
   });
+}
+
+// startLoginCountdown 锁定期倒计时：保持提交按钮禁用、逐秒刷新提示，
+// 归零后复用 setButtonLoading 还原图标/文案并重新可用。
+function startLoginCountdown(seconds) {
+  const btn = document.getElementById("btn-login");
+  const errEl = document.getElementById("login-error");
+  const input = document.getElementById("login-token");
+  if (!btn) return;
+  const label = btn.querySelector(".btn-label");
+  let remaining = Math.max(1, seconds);
+  btn.dataset.countdown = "1";
+  if (input) input.blur();
+  const tick = function () {
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = "验证过于频繁，" + remaining + " 秒后再试";
+    }
+    if (label) label.textContent = "请等待 " + remaining + " 秒";
+    if (remaining <= 0) {
+      clearInterval(timer);
+      delete btn.dataset.countdown;
+      setButtonLoading(btn, false);
+      if (errEl) {
+        errEl.hidden = true;
+        errEl.textContent = "";
+      }
+      if (input) input.focus();
+      return;
+    }
+    remaining--;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+}
+
+// copyShareLink 复制当前目录的短链分享地址。
+function copyShareLink() {
+  getDirToken(currentDir)
+    .then(function (token) {
+      return copyText(window.location.origin + "/?d=" + token);
+    })
+    .then(function () {
+      showToast("目录分享链接已复制，对方需验证后才能访问", "success");
+    })
+    .catch(function (err) {
+      showToast("复制失败，" + (err.message || "请重试"), "error");
+      console.warn("复制分享链接失败", err);
+    });
 }
 
 function renderBreadcrumbs() {
   const container = document.getElementById("breadcrumbs");
   if (!container) return;
   container.replaceChildren();
+
+  // 标签页标题随目录变化
+  const parts = currentDir.split("/").filter(function (p) {
+    return p !== "";
+  });
+  document.title = parts.length
+    ? parts[parts.length - 1] + " · 即刻轻盘"
+    : "即刻轻盘";
 
   if (currentDir === "/") {
     const rootSpan = document.createElement("span");
@@ -877,9 +952,6 @@ function renderBreadcrumbs() {
   });
   container.appendChild(rootBtn);
 
-  const parts = currentDir.split("/").filter(function (p) {
-    return p !== "";
-  });
   let accPath = "";
   parts.forEach(function (part, index) {
     const sep = document.createElement("span");
@@ -1645,6 +1717,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   const themeBtn = document.getElementById("btn-theme");
   if (themeBtn) themeBtn.addEventListener("click", toggleTheme);
+
+  const shareBtn = document.getElementById("btn-share");
+  if (shareBtn) {
+    shareBtn.addEventListener("click", copyShareLink);
+  }
 
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {
