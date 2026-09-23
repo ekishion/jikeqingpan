@@ -4,9 +4,12 @@
 .gotmp
 
 # build artifacts
-cmd
+cmd/bin/
+bin/
+dist/
 *.exe
 *.test
+*.out
 
 # secrets & local env
 config.json
@@ -14,10 +17,26 @@ config.json
 .env.*
 !.env.example
 
+# runtime & state data
+data/
+*.db*
+state.json*
+*.log
+
 # not needed in image build context
 README.md
+LICENSE
 **/*_test.go
 .dockerignore
 Dockerfile
 docker-compose.yml
-docs
+docs/
+
+# IDE & OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+.zcode/
+.mimosa/

@@ -27,6 +27,8 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      - name: 单元测试
+        run: go test -v ./...
       - name: 前端 JS 语法检查
         run: |
           for f in web/static/*.js; do
