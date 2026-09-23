@@ -28,6 +28,8 @@ let lastPageLimit = 1500;
 let sortState = { key: "name", dir: "asc" };
 // 当前目录 README 的取回缓存，避免排序切换重渲染时重复请求
 let readmeCache = null;
+// 当前目录加载序号，防止异步时序竞争
+let currentDirSeq = 0;
 
 // ===== 主题（手动深/浅切换，未选择时跟随系统） =====
 
@@ -992,6 +994,8 @@ function enterDir(dir) {
 function loadFiles(dir, opts) {
   opts = opts || {};
   let targetDir = dir || currentDir;
+  currentDirSeq++;
+  const thisSeq = currentDirSeq;
   const listEl = document.getElementById("file-list");
   const statusEl = document.getElementById("status");
   const countEl = document.getElementById("file-count");
@@ -1026,6 +1030,9 @@ function loadFiles(dir, opts) {
   if (countEl) countEl.textContent = "加载中…";
 
   const requestBody = opts.token ? { token: opts.token } : { dir: targetDir };
+  if (opts.refresh) {
+    requestBody.refresh = true;
+  }
   return apiFetch("/api/files", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1045,6 +1052,7 @@ function loadFiles(dir, opts) {
       });
     })
     .then(function (data) {
+      if (thisSeq !== currentDirSeq) return;
       statusEl.style.display = "none";
       if (refreshBtn) refreshBtn.disabled = false;
 
@@ -1145,8 +1153,16 @@ function renderCurrentList(dir) {
     frag.appendChild(buildFileItem(files[i]));
   }
   listEl.appendChild(frag);
+  const readmePanel = document.getElementById("readme-panel");
   const readmeFile = findReadmeFile(files);
-  if (uiConfig.showReadme && readmeFile) loadReadme(readmeFile.path || "", files, dir);
+  if (uiConfig.showReadme && readmeFile) {
+    loadReadme(readmeFile.path || "", files, dir, currentDirSeq);
+  } else {
+    if (readmePanel) {
+      readmePanel.hidden = true;
+      readmePanel.replaceChildren();
+    }
+  }
 }
 
 function findReadmeFile(files) {
@@ -1165,12 +1181,14 @@ function findReadmeFile(files) {
   return match;
 }
 
-function loadReadme(path, files, dir) {
+function loadReadme(path, files, dir, seq) {
   const panel = document.getElementById("readme-panel");
   if (!panel) return;
   // 同目录重渲染（排序切换）时直接复用，不重复请求
   if (readmeCache && readmeCache.dir === dir && readmeCache.path === path) {
-    renderReadmePanel(readmeCache.data, files, dir);
+    if (dir === currentDir) {
+      renderReadmePanel(readmeCache.data, files, dir);
+    }
     return;
   }
   apiFetch("/api/readme", {
@@ -1185,6 +1203,8 @@ function loadReadme(path, files, dir) {
       });
     })
     .then(function (data) {
+      // 严格检查：如果用户已切换目录或序列号过期，彻底丢弃响应！
+      if (dir !== currentDir || (seq !== undefined && seq !== currentDirSeq)) return;
       if (!data.found) return;
       readmeCache = { dir: dir, path: path, data: data };
       renderReadmePanel(data, files, dir);
@@ -1196,7 +1216,7 @@ function loadReadme(path, files, dir) {
 
 function renderReadmePanel(data, files, dir) {
   const panel = document.getElementById("readme-panel");
-  if (!panel) return;
+  if (!panel || dir !== currentDir) return;
   const heading = document.createElement("div");
   heading.className = "readme-heading";
   const readmeIcon = document.createElement("div");
@@ -1744,7 +1764,7 @@ document.addEventListener("DOMContentLoaded", function () {
         requireLogin("");
         return;
       }
-      loadFiles(currentDir);
+      loadFiles(currentDir, { refresh: true });
     });
   }
 

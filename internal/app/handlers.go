@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.version})
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -88,11 +88,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // 支持两种定位方式：{dir} 明文路径，或 {token} 目录短链（服务端解析）。
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	var dir, token string
+	var refresh bool
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
 		var request struct {
-			Dir   string `json:"dir"`
-			Token string `json:"token"`
+			Dir     string `json:"dir"`
+			Token   string `json:"token"`
+			Refresh bool   `json:"refresh"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "bad_request", "请求内容有误，请刷新页面重试")
@@ -100,9 +102,12 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		dir = request.Dir
 		token = request.Token
+		refresh = request.Refresh
 	} else {
 		dir = r.URL.Query().Get("dir")
 		token = r.URL.Query().Get("token")
+		qRefresh := r.URL.Query().Get("refresh")
+		refresh = qRefresh == "1" || strings.EqualFold(qRefresh, "true")
 	}
 	if token != "" {
 		resolved, ok := s.dirLinks.resolve(token)
@@ -125,22 +130,46 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.fetchFileList(dir)
-	if err != nil {
-		log.Printf("[ERROR] 获取文件列表失败: %v", err)
-		writeJSONError(w, http.StatusBadGateway, "baidu_list_failed", "无法获取文件列表，请稍后重试")
-		return
+	var listBody []byte
+	fromCache := false
+	if !refresh {
+		if cached, ok := s.cache.getDirList(dir); ok {
+			listBody = cached
+			fromCache = true
+		}
 	}
 
-	// 先按共享范围过滤再写缓存：越界路径不占用缓存空间。
-	// 缓存需要 dlink 字段计算签名，因此先 update 缓存、再剥离 dlink 返回给前端。
-	filteredBody, err := s.filterFileList(result.Body)
+	if listBody == nil {
+		if refresh {
+			s.cache.invalidateDir(dir)
+		}
+		result, err := s.fetchFileList(dir)
+		if err != nil {
+			log.Printf("[ERROR] 获取文件列表失败: %v", err)
+			writeJSONError(w, http.StatusBadGateway, "baidu_list_failed", "无法获取文件列表，请稍后重试")
+			return
+		}
+
+		filtered, err := s.filterFileList(result.Body)
+		if err != nil {
+			log.Printf("[ERROR] 过滤共享范围失败: %v", err)
+			writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败")
+			return
+		}
+		s.cache.update(filtered)
+		s.cache.setDirList(dir, filtered)
+		s.markStateDirty()
+		listBody = filtered
+	}
+
+	// 无论是缓存还是实时获取，都统一过一次范围过滤（防御 AllowedPaths 动态调整）
+	filteredBody, err := s.filterFileList(listBody)
 	if err != nil {
 		log.Printf("[ERROR] 过滤共享范围失败: %v", err)
 		writeJSONError(w, http.StatusBadGateway, "list_process_failed", "文件列表处理失败")
 		return
 	}
-	s.cache.update(filteredBody)
+
 	publicBody, err := stripDownloadLinks(filteredBody)
 	if err != nil {
 		log.Printf("[ERROR] 清理文件列表直链失败: %v", err)
@@ -155,6 +184,11 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if fromCache {
+		w.Header().Set("X-Cache", "HIT")
+	} else {
+		w.Header().Set("X-Cache", "MISS")
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(publicBody)
 }
@@ -225,12 +259,23 @@ func (s *Server) handleReadme(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_path", "文件路径无效")
 		return
 	}
-	if !isReadmeFileName(readmeName(readmePath)) {
+	readmeNameStr := readmeName(readmePath)
+	if !isReadmeFileName(readmeNameStr) {
 		writeJSONError(w, http.StatusNotFound, "readme_not_found", "README 不存在")
 		return
 	}
 	if !s.pathAllowed(readmePath) {
 		writeJSONError(w, http.StatusForbidden, "path_not_allowed", "该目录不在共享范围内")
+		return
+	}
+
+	if cachedName, cachedContent, ok := s.cache.getReadme(readmePath); ok {
+		w.Header().Set("X-Cache", "HIT")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"found":   true,
+			"name":    cachedName,
+			"content": cachedContent,
+		})
 		return
 	}
 
@@ -264,10 +309,14 @@ func (s *Server) handleReadme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	content := string(body)
+	s.cache.setReadme(readmePath, readmeNameStr, content)
+
+	w.Header().Set("X-Cache", "MISS")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"found":   true,
-		"name":    readmeName(readmePath),
-		"content": string(body),
+		"name":    readmeNameStr,
+		"content": content,
 	})
 }
 

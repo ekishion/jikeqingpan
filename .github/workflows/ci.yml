@@ -29,7 +29,7 @@ jobs:
         run: go vet ./...
       - name: 前端 JS 语法检查
         run: |
-          for f in static/*.js; do
+          for f in web/static/*.js; do
             node --check "$f"
           done
 
@@ -53,4 +53,4 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /dev/null .
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/jikeqingpan

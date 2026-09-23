@@ -1,4 +1,4 @@
-module jikeqingpan
+module github.com/ekishion/jikeqingpan
 
 go 1.25.0
 

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"crypto/hmac"
@@ -46,7 +46,7 @@ type Config struct {
 
 	// StateBackend 状态持久化后端：none（默认，重启后短链全部失效）|
 	// sqlite（state_path 为 .db 文件）| json（原子快照文件）。
-	// 持久化范围：目录短链与下载短链；缓存/限流状态不持久化。
+	// 持久化范围：目录短链、下载短链与目录列表本地缓存（降低百度请求频率）。
 	StateBackend string `json:"state_backend"`
 	// StatePath 持久化文件路径；state_backend 非 none 时必填。
 	StatePath string `json:"state_path"`
@@ -161,7 +161,13 @@ func (c *Config) sessionSigningKey() []byte {
 	return mac.Sum(nil)
 }
 
-func loadConfig(path string) (*Config, error) {
+// AuthEnabled reports whether access token authentication is enabled.
+func (c *Config) AuthEnabled() bool {
+	return c.authEnabled()
+}
+
+// LoadConfig 从指定路径加载并解析配置文件，并自动应用环境变量覆盖与规范化校验。
+func LoadConfig(path string) (*Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if err != nil {

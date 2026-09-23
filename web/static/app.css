@@ -1286,7 +1286,7 @@ body.lightbox-open { overflow: hidden; }
 .footer-icon .icon { width: 15px; height: 15px; }
 
 /* ===== 移动端 ===== */
-@media (max-width: 620px) {
+@media (max-width: 640px) {
   body { padding: 26px 12px 72px; }
 
   .brand-mark { --sz: 44px; border-radius: 12px; }
@@ -1308,12 +1308,13 @@ body.lightbox-open { overflow: hidden; }
     width: 100%;
     min-width: 0;
   }
-  /* 移动端第二行：计数 | 分享 | 排序 | 刷新 同一排 */
+  /* 移动端第二行：计数 | 排序 | 分享 | 刷新 同一排 */
   .file-count { grid-column: 1; grid-row: 2; padding-left: 0; }
-  .btn-share { grid-column: 2; grid-row: 2; justify-self: end; padding: 9px; }
+  .sort-group { grid-column: 2; grid-row: 2; justify-self: end; }
+  .btn-share { grid-column: 3; grid-row: 2; justify-self: end; padding: 9px; }
   .btn-share .btn-label { display: none; }
-  .sort-group { grid-column: 3; grid-row: 2; justify-self: end; }
-  .btn-refresh { grid-column: 4; grid-row: 2; justify-self: end; }
+  .btn-refresh { grid-column: 4; grid-row: 2; justify-self: end; padding: 9px; }
+  .btn-refresh .btn-label { display: none; }
 
   .file-item {
     display: grid;

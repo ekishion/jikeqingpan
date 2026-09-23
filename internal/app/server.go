@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"io/fs"
@@ -39,9 +39,14 @@ type Server struct {
 	persistMu    sync.Mutex
 	flushStop    chan struct{}
 	stateDirty   atomic.Bool
+	version      string
 }
 
-func newServer(cfg *Config, staticContent fs.FS) *Server {
+// NewServer 创建并初始化应用服务器。
+func NewServer(cfg *Config, staticContent fs.FS, version string) *Server {
+	if version == "" {
+		version = "dev"
+	}
 	sub, err := fs.Sub(staticContent, "static")
 	if err != nil {
 		// 允许测试传入已是 static 根的 FS
@@ -49,6 +54,7 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 	}
 	s := &Server{
 		cfg:          cfg,
+		version:      version,
 		limiter:      newRateLimiter(cfg.RateLimitPerSecond),
 		mux:          http.NewServeMux(),
 		baiduBaseURL: "https://pan.baidu.com",
@@ -77,6 +83,55 @@ func newServer(cfg *Config, staticContent fs.FS) *Server {
 	s.restorePersistedState()
 	s.startStateFlusher()
 	return s
+}
+
+// Handler 返回 HTTP 路由处理器。
+func (s *Server) Handler() http.Handler {
+	return s.mux
+}
+
+// Close 优雅关闭服务器的持久化与审计日志资源。
+func (s *Server) Close() {
+	s.closePersist()
+	s.closeAudit()
+}
+
+// WriteTimeoutFor 按 list_max_pages 推导 WriteTimeout：最坏路径是
+// maxPages 次串行百度请求（每次 15s 客户端超时 + 1s 余量），外加
+// 60s 预览/README 流式转发余量；下限 120s 兜底常规场景。
+func WriteTimeoutFor(cfg *Config) time.Duration {
+	derived := 60*time.Second + time.Duration(cfg.listMaxPages())*16*time.Second
+	if derived < 120*time.Second {
+		return 120 * time.Second
+	}
+	return derived
+}
+
+// WarnRiskyConfig 启动时提示有风险但不阻断的配置组合。
+func WarnRiskyConfig(cfg *Config) {
+	if cfg.authEnabled() && len(cfg.AccessToken) < 16 {
+		log.Printf("[WARN] access_token 长度不足 16 位，容易被穷举；建议用 openssl rand -hex 24 生成高熵令牌")
+	}
+	bindIP := net.ParseIP(cfg.BindAddress)
+	bindLoopback := cfg.BindAddress == "localhost" || (bindIP != nil && bindIP.IsLoopback())
+	if bindLoopback {
+		return
+	}
+	for _, raw := range cfg.TrustedProxyIPs {
+		raw = strings.TrimSpace(raw)
+		loopback := false
+		if ip := net.ParseIP(raw); ip != nil {
+			loopback = ip.IsLoopback()
+		} else if _, network, err := net.ParseCIDR(raw); err == nil {
+			loopback = network.Contains(net.ParseIP("127.0.0.1")) || network.Contains(net.ParseIP("::1"))
+		}
+		if loopback {
+			log.Printf("[WARN] trusted_proxy_ips 含环回地址 %q 且服务绑定在 %q：本机任意进程可伪造 X-Forwarded-For "+
+				"获得新的限流桶并重置登录锁定。仅当反代确实经环回直连（非容器网络）时才安全；"+
+				"容器部署请填写 docker 网关 CIDR 而非 127.0.0.1", raw, cfg.BindAddress)
+			return
+		}
+	}
 }
 
 func (s *Server) routes() {
@@ -189,8 +244,9 @@ func (s *Server) restorePersistedState() {
 	}
 	s.dirLinks.restore(st.DirLinks)
 	s.shortLinks.restore(st.ShortLinks)
+	s.cache.restoreDirCache(st.DirCache)
 	s.persist = persist
-	log.Printf("[状态] 已恢复目录短链 %d 条、下载短链 %d 条", len(st.DirLinks), len(st.ShortLinks))
+	log.Printf("[状态] 已恢复目录短链 %d 条、下载短链 %d 条、目录缓存 %d 个", len(st.DirLinks), len(st.ShortLinks), len(st.DirCache))
 }
 
 // startStateFlusher 周期把变脏的状态落盘（30s）。
@@ -239,6 +295,7 @@ func (s *Server) flushState() error {
 		Version:    1,
 		DirLinks:   s.dirLinks.snapshot(),
 		ShortLinks: s.shortLinks.snapshot(),
+		DirCache:   s.cache.exportDirCache(),
 	}
 	return s.persist.Save(st)
 }

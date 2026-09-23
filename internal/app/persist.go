@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"database/sql"
@@ -22,11 +22,19 @@ type persistedLink struct {
 	Uses      int    `json:"uses,omitempty"`
 }
 
+// PersistedDirCache 持久化的目录列表缓存条目。
+type PersistedDirCache struct {
+	Dir      string          `json:"dir"`
+	Body     json.RawMessage `json:"body"`
+	CachedAt int64           `json:"cached_at"` // unix 秒级时间戳
+}
+
 // persistedState 落盘状态快照。
 type persistedState struct {
-	Version    int             `json:"version"`
-	DirLinks   []persistedLink `json:"dir_links,omitempty"`
-	ShortLinks []persistedLink `json:"short_links,omitempty"`
+	Version    int                 `json:"version"`
+	DirLinks   []persistedLink     `json:"dir_links,omitempty"`
+	ShortLinks []persistedLink     `json:"short_links,omitempty"`
+	DirCache   []PersistedDirCache `json:"dir_cache,omitempty"`
 }
 
 // statePersistence 状态持久化后端。实现必须保证 Save 的原子性：
@@ -158,6 +166,18 @@ func (p *sqlitePersistence) Load() (*persistedState, error) {
 			return nil, fmt.Errorf("状态行 short_links 损坏: %w", err)
 		}
 	}
+
+	var dirCacheRaw []byte
+	err = p.db.QueryRow("SELECT value FROM state WHERE key = ?", "dir_cache").Scan(&dirCacheRaw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return nil, err
+	default:
+		if err := json.Unmarshal(dirCacheRaw, &st.DirCache); err != nil {
+			return nil, fmt.Errorf("状态行 dir_cache 损坏: %w", err)
+		}
+	}
 	return st, nil
 }
 
@@ -176,11 +196,18 @@ func (p *sqlitePersistence) Save(st *persistedState) error {
 	if err != nil {
 		return err
 	}
+	dirCacheRaw, err := json.Marshal(st.DirCache)
+	if err != nil {
+		return err
+	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec("INSERT OR REPLACE INTO state (key, value, updated_at) VALUES (?, ?, ?)", "dir_links", dirRaw, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec("INSERT OR REPLACE INTO state (key, value, updated_at) VALUES (?, ?, ?)", "short_links", shortRaw, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("INSERT OR REPLACE INTO state (key, value, updated_at) VALUES (?, ?, ?)", "dir_cache", dirCacheRaw, now); err != nil {
 		return err
 	}
 	return tx.Commit()

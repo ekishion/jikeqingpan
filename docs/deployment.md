@@ -22,7 +22,7 @@ Internet → Nginx/Caddy (HTTPS) → 127.0.0.1:4172 → jikeqingpan
 cp config.example.json config.json
 # 编辑 config.json
 
-go build -trimpath -ldflags="-s -w" -o cmd/bin/main .
+go build -trimpath -ldflags="-s -w" -o cmd/bin/main ./cmd/jikeqingpan
 # 或
 bash build.sh
 

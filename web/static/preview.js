@@ -325,15 +325,73 @@ function toggleMediaMute() {
   syncMuteIcon(el);
 }
 
+function isMediaFullscreen(el) {
+  const video = el || activeMediaEl();
+  if (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement) {
+    return true;
+  }
+  if (video && video.webkitDisplayingFullscreen) {
+    return true;
+  }
+  return false;
+}
+
+function syncFullscreenUI() {
+  const fsBtn = document.getElementById("media-fs");
+  if (!fsBtn) return;
+  const video = document.getElementById("lightbox-video");
+  const isFs = isMediaFullscreen(video);
+  const iconWrap = fsBtn.querySelector(".btn-icon");
+  if (iconWrap) {
+    iconWrap.replaceChildren(makeIcon(isFs ? "minimize" : "maximize"));
+    iconWrap.dataset.iconMounted = "1";
+  }
+  fsBtn.setAttribute("aria-label", isFs ? "退出全屏" : "全屏");
+}
+
 function toggleMediaFullscreen() {
   const el = activeMediaEl();
-  if (!el || !el.requestFullscreen) return;
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
+  if (!el || previewState.kind !== "video") return;
+  if (isMediaFullscreen(el)) {
+    if (document.exitFullscreen) {
+      const p = document.exitFullscreen();
+      if (p && p.catch) p.catch(function () { /* 保持静默 */ });
+    } else if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    } else if (document.mozCancelFullScreen) {
+      document.mozCancelFullScreen();
+    } else if (document.msExitFullscreen) {
+      document.msExitFullscreen();
+    } else if (el.webkitExitFullscreen) {
+      try { el.webkitExitFullscreen(); } catch (e) { /* 保持静默 */ }
+    }
   } else {
-    const p = el.requestFullscreen();
-    if (p && p.catch) p.catch(function () { /* 保持静默 */ });
+    if (el.requestFullscreen) {
+      const p = el.requestFullscreen();
+      if (p && p.catch) {
+        p.catch(function () {
+          if (el.webkitEnterFullscreen) {
+            try { el.webkitEnterFullscreen(); } catch (e) { /* 保持静默 */ }
+          }
+        });
+      }
+    } else if (el.webkitRequestFullscreen) {
+      try {
+        el.webkitRequestFullscreen();
+      } catch (e) {
+        if (el.webkitEnterFullscreen) {
+          try { el.webkitEnterFullscreen(); } catch (err) { /* 保持静默 */ }
+        }
+      }
+    } else if (el.webkitEnterFullscreen) {
+      try { el.webkitEnterFullscreen(); } catch (e) { /* 保持静默 */ }
+    } else if (el.mozRequestFullScreen) {
+      try { el.mozRequestFullScreen(); } catch (e) { /* 保持静默 */ }
+    } else if (el.msRequestFullscreen) {
+      try { el.msRequestFullscreen(); } catch (e) { /* 保持静默 */ }
+    }
   }
+  setTimeout(syncFullscreenUI, 100);
 }
 
 let mediaSeeking = false;
@@ -379,8 +437,16 @@ function bindMediaPlayer() {
       });
     });
   });
+  ["fullscreenchange", "webkitfullscreenchange", "mozfullscreenchange", "MSFullscreenChange"].forEach(function (eventName) {
+    document.addEventListener(eventName, syncFullscreenUI);
+  });
   const video = document.getElementById("lightbox-video");
-  if (video) video.addEventListener("click", toggleMediaPlay);
+  if (video) {
+    video.addEventListener("click", toggleMediaPlay);
+    ["webkitbeginfullscreen", "webkitendfullscreen", "webkitpresentationmodechanged"].forEach(function (eventName) {
+      video.addEventListener(eventName, syncFullscreenUI);
+    });
+  }
 }
 
 // ===== 灯箱外壳 =====
@@ -414,7 +480,12 @@ function resetPreviewPanes() {
     disc.hidden = true;
     disc.classList.remove("is-playing");
   }
-  if (fsBtn) fsBtn.hidden = true;
+  if (fsBtn) {
+    fsBtn.hidden = true;
+    const iconWrap = fsBtn.querySelector(".btn-icon");
+    if (iconWrap) iconWrap.replaceChildren(makeIcon("maximize"));
+    fsBtn.setAttribute("aria-label", "全屏");
+  }
   if (playBtn) {
     const iconWrap = playBtn.querySelector(".btn-icon");
     if (iconWrap) iconWrap.replaceChildren(makeIcon("play"));
