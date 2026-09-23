@@ -1,21 +1,29 @@
 # syntax=docker/dockerfile:1
 
-# ---- build ----
-FROM golang:1.25-alpine AS builder
+# 使用 --platform=$BUILDPLATFORM 让编译阶段始终运行在宿主机原生 CPU 架构上（极速构建，避免 QEMU 软仿真开销）
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates
 
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY web/ ./web/
 
-# 纯标准库为主（SQLite 持久化为纯 Go 驱动）；不写死 GOARCH，便于 buildx 多架构（amd64/arm64）
+# BuildKit 自动注入目标系统的 OS 和架构（如 linux/amd64 或 linux/arm64）
+# 纯 Go（CGO_ENABLED=0）原生支持极速交叉编译
+ARG TARGETOS=linux
+ARG TARGETARCH
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/jikeqingpan ./cmd/jikeqingpan
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/jikeqingpan ./cmd/jikeqingpan
 
 # ---- runtime ----
 FROM alpine:3.22
