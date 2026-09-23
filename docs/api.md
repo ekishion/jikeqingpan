@@ -60,14 +60,15 @@ POST /api/files
 Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
-{"dir": "/"}
+{"dir": "/", "refresh": false}
 ```
 
 说明：
 
-- 兼容 `GET /api/files?dir=/`
+- 兼容 `GET /api/files?dir=/&refresh=0`
 - 也可用目录短链定位：`{"token": "<32位hex>"}`（与 `dir` 二选一），见 [目录短链](#目录短链)
-- 响应中的 `dlink` 会在返回前剥离
+- **本地缓存与穿透**：默认命中本地目录缓存，响应头返回 `X-Cache: HIT`（未命中或回源返回 `X-Cache: MISS`）；传 `{"refresh": true}` 或 query `?refresh=1` 可强制绕过缓存回源百度并更新本地缓存
+- 响应中的 `dlink` 会在返回前端前剥离
 - 响应附带 `resolved_dir` 字段（当前列表对应的真实目录，token 请求时前端据此还原路径）
 - 自动翻页合并（每页 100，最多约 15 页，可用 `list_max_pages` 调整）
 - 若截断会带 `truncated: true`、`list_pages` 等字段
@@ -93,10 +94,11 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-- 令牌 32 位 hex，有效期默认 7 天（`dir_link_ttl_seconds`），重启后失效
+- 令牌 32 位 hex，有效期默认 7 天（`dir_link_ttl_seconds`）
 - **隐藏的是路径，不是权限**：打开短链仍需登录，目录权限在使用时按 `allowed_paths` 重新校验
+- 配置 `state_backend`（`sqlite` / `json`）时，目录短链跨重启保留；未配置时重启失效
 - 文件列表接口接受 `{"token": "..."}`，响应中的 `resolved_dir` 为解析出的真实目录
-- 常见错误：`dirlink_failed`、`dirlink_not_found`（令牌过期或服务重启后失效）
+- 常见错误：`dirlink_failed`、`dirlink_not_found`（令牌过期或失效）
 
 ### 目录 README
 
@@ -113,6 +115,7 @@ X-CSRF-Token: <csrf_token>
 - 优先级为 `README.md`、`README.markdown`、`README.txt`、`README`
 - 接口只接受上述四种 README 文件名；内容上限为 512 KB，超出后不展示
 - 支持标题、段落、列表、引用、代码、链接等常用 Markdown；原始 HTML 和脚本不会执行
+- **内容缓存**：已读取的 README 文本自动在后端缓存（TTL 与 `file_cache_ttl_seconds` 一致，响应头同样返回 `X-Cache: HIT/MISS`）；对应目录刷新时自动失效缓存重拉
 
 ## 下载短链
 

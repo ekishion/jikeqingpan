@@ -12,15 +12,18 @@
 ├── internal/
 │   └── app/                  # 核心业务逻辑实现（Go 私有包，禁止外部导入）
 │       ├── baidu.go          # 百度青春版 API 代理、直链解析与参数签名
-│       ├── cache.go          # 文件元数据与直链多级缓存
+│       ├── cache.go          # 目录与文件元数据多级缓存（支持内存与落盘持久化）
+│       ├── cache_test.go     # 缓存读写、TTL 与主动失效测试
 │       ├── config.go         # 服务配置结构体、环境变量覆盖与校验
 │       ├── dirlink.go        # 目录短链（?d=令牌）管理与过期清理
 │       ├── evict.go          # 采样淘汰算法
 │       ├── handlers.go       # HTTP API 路由处理器
+│       ├── handlers_test.go  # 接口鉴权、目录缓存与响应头测试
 │       ├── httputil.go       # HTTP / Cookie / CSRF / IP 工具库
 │       ├── loginguard.go     # 登录失败 IP 锁定与指数退避防护
 │       ├── pathsec.go        # 路径遍历防护与百度直链域名白名单
 │       ├── persist.go        # SQLite / JSON 状态持久化后端驱动
+│       ├── persist_test.go   # SQLite / JSON 状态落盘与恢复测试
 │       ├── ratelimit.go      # 基于 IP 的令牌桶限流器
 │       ├── server.go         # HTTP Server 封装、安全中间件与路由注册
 │       ├── session.go        # HMAC-SHA256 会话签名与无状态校验

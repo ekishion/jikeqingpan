@@ -19,6 +19,7 @@
 - CSRF：双提交 Cookie，保护 POST
 - 下载短链：32 位随机 hex，可配 TTL / 次数上限；直链解析失败不消耗使用次数
 - 目录短链（`?d=`）：同规格随机令牌，默认 7 天 TTL，仅隐藏路径不改变权限；可选 `state_backend`（sqlite/json）跨重启持久化
+- 本地目录缓存：列表与 README 本地缓存（内存 + SQLite/JSON），受 TTL 约束；缓存命中时仍强制执行 `allowed_paths` 白名单二次校验，杜绝配置热改导致的数据越权
 - 路径校验：拒绝 `..`、异常字符、规范化后语义变化的路径
 - 直链域名白名单：仅允许百度相关 HTTPS 域名
 - dlink 缓存绑定 User-Agent，降低跨浏览器复用风险
@@ -26,7 +27,7 @@
 - 文本预览（`/api/text`）仅接受扩展名白名单（与前端同步），内容以 JSON 字符串回传由前端安全渲染，非 UTF-8 内容直接拒绝
 - 媒体播放（`<video>/<audio>`）复用下载短链 302 到百度直链，CSP `media-src` 与直链白名单保持一致，媒体流量不经 VPS 中转
 - 按 IP 限流；`X-Forwarded-For` 只在来源命中 `trusted_proxy_ips` 白名单时才被采信（从右向左跳过可信代理取第一个不可信 IP）
-- 元数据缓存 / 短链 / 限流客户端均有上限（超限采样淘汰）
+- 元数据与目录缓存 / 短链 / 限流客户端均有上限（超限采样淘汰）
 - 审计日志超 10 MB 自动轮转为 `*.old`，磁盘占用有界
 - 安全响应头：`X-Content-Type-Options`、`X-Frame-Options`、CSP、`Referrer-Policy` 等
 - HTTP Server 读写超时与优雅关闭
